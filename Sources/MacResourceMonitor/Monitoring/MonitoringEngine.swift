@@ -39,6 +39,7 @@ actor MonitoringEngine {
     private var generation = UUID()
     private var sampling: Task<MonitoringUpdate, Never>?
     private var samplingID: UUID?
+    private var loggingTail: Task<Void, Never>?
     private var subscribers: [UUID: AsyncStream<MonitoringUpdate>.Continuation] = [:]
     private(set) var history: MetricHistory
 
@@ -166,7 +167,7 @@ actor MonitoringEngine {
     }
 
     private func commit(_ readings: ProviderReadings, at date: Date,
-                        generation token: UUID) async -> MonitoringUpdate {
+                        generation token: UUID) -> MonitoringUpdate {
         guard generation == token, !Task.isCancelled else {
             return MonitoringUpdate(snapshot: Self.cancelledSnapshot(at: date), history: history)
         }
@@ -175,20 +176,30 @@ actor MonitoringEngine {
                                       memory: readings.1, network: networkMetric(readings.2, at: date),
                                       thermal: readings.4, disk: diskMetric(readings.3, at: date))
         history.append(snapshot)
-        await recordDiagnostics(readings, at: date)
+        enqueueDiagnostics(readings, at: date)
         return MonitoringUpdate(snapshot: snapshot, history: history)
     }
 
-    private func recordDiagnostics(_ readings: ProviderReadings, at date: Date) async {
-        await record(.cpu, reading: readings.0, at: date)
-        await record(.memory, reading: readings.1, at: date)
-        await record(.network, reading: readings.2, at: date)
-        await record(.disk, reading: readings.3, at: date)
-        await record(.sensors, reading: readings.4, at: date)
+    private func enqueueDiagnostics(_ readings: ProviderReadings, at date: Date) {
+        let predecessor = loggingTail
+        let logger = logger
+        loggingTail = Task.detached {
+            _ = await predecessor?.value
+            await Self.recordDiagnostics(readings, at: date, logger: logger)
+        }
     }
 
-    private func record<Value>(_ component: DiagnosticComponent, reading: Reading<Value>,
-                               at date: Date) async {
+    nonisolated private static func recordDiagnostics(_ readings: ProviderReadings, at date: Date,
+                                                      logger: any DiagnosticLogging) async {
+        await record(.cpu, reading: readings.0, at: date, logger: logger)
+        await record(.memory, reading: readings.1, at: date, logger: logger)
+        await record(.network, reading: readings.2, at: date, logger: logger)
+        await record(.disk, reading: readings.3, at: date, logger: logger)
+        await record(.sensors, reading: readings.4, at: date, logger: logger)
+    }
+
+    nonisolated private static func record<Value>(_ component: DiagnosticComponent, reading: Reading<Value>,
+                                                  at date: Date, logger: any DiagnosticLogging) async {
         let failure: String?
         switch reading {
         case .value: failure = nil

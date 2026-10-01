@@ -39,6 +39,22 @@ final class MonitoringEngineTests: XCTestCase {
     func testDiagnosticWriteFailureDoesNotLoseSample() async throws {
         try await MonitoringChecks.diagnosticWriteFailure()
     }
+
+    func testSlowLoggerDoesNotDelaySamplesOrReorderEvents() async throws {
+        try await MonitoringChecks.slowLoggerDoesNotDelaySamples()
+    }
+
+    func testSlowLoggerDoesNotDelayStreamPublication() async throws {
+        try await MonitoringChecks.slowLoggerDoesNotDelayPublication()
+    }
+
+    func testStaleSampleNeverQueuesDiagnostics() async throws {
+        try await MonitoringChecks.staleSampleDoesNotLog()
+    }
+
+    func testLoggerTailDoesNotRetainEngine() async throws {
+        try await MonitoringChecks.loggerTailDoesNotRetainEngine()
+    }
 }
 #else
 @main
@@ -72,6 +88,10 @@ enum MonitoringHarness {
         try await MonitoringChecks.storeLifetime()
         try await MonitoringChecks.diagnosticLog()
         try await MonitoringChecks.diagnosticWriteFailure()
+        try await MonitoringChecks.slowLoggerDoesNotDelaySamples()
+        try await MonitoringChecks.slowLoggerDoesNotDelayPublication()
+        try await MonitoringChecks.staleSampleDoesNotLog()
+        try await MonitoringChecks.loggerTailDoesNotRetainEngine()
         print("PASS: monitoring lifecycle and diagnostic logging scenarios")
     }
 }
@@ -114,6 +134,25 @@ private actor FailingDiagnosticLogger: DiagnosticLogging {
 
 private actor SilentDiagnosticLogger: DiagnosticLogging {
     func record(component: DiagnosticComponent, failure: String?, at date: Date) {}
+}
+
+private actor GatedDiagnosticLogger: DiagnosticLogging {
+    private var gate: CheckedContinuation<Void, Never>?
+    private(set) var events: [(DiagnosticComponent, Date)] = []
+
+    func record(component: DiagnosticComponent, failure: String?, at date: Date) async {
+        events.append((component, date))
+        if events.count == 1 {
+            await withCheckedContinuation { gate = $0 }
+        }
+    }
+
+    var isBlocked: Bool { gate != nil }
+
+    func release() {
+        gate?.resume()
+        gate = nil
+    }
 }
 
 private struct FakeMemoryProvider: MemoryProviding {
@@ -170,6 +209,105 @@ private actor GatedMemoryProvider: MemoryProviding {
 }
 
 private enum MonitoringChecks {
+    static func waitUntil(_ condition: @escaping @Sendable () async -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return await condition()
+    }
+
+    static func slowLoggerDoesNotDelaySamples() async throws {
+        let logger = GatedDiagnosticLogger()
+        let engine = MonitoringEngine(providers: providers(cpu: AdvancingCPUProvider()), logger: logger)
+        let firstFinished = CompletionFlag()
+        let secondFinished = CompletionFlag()
+        let firstDate = Date(timeIntervalSince1970: 1)
+        let secondDate = Date(timeIntervalSince1970: 2)
+        let first = Task {
+            let snapshot = await engine.sample(at: firstDate)
+            await firstFinished.finish()
+            return snapshot
+        }
+        let entered = await waitUntil { await logger.isBlocked }
+        let firstReturned = await waitUntil { await firstFinished.completed }
+        let second = Task {
+            let snapshot = await engine.sample(at: secondDate)
+            await secondFinished.finish()
+            return snapshot
+        }
+        let secondReturned = await waitUntil { await secondFinished.completed }
+        await engine.stop()
+        await logger.release()
+
+        try require(entered && firstReturned && secondReturned,
+                    "Both samples return while the first log write is blocked")
+        let snapshots = await (first.value, second.value)
+        try require(snapshots.0.timestamp == firstDate && snapshots.1.timestamp == secondDate,
+                    "Nonblocking logging preserves sample results")
+        let drained = await waitUntil { await logger.events.count == 10 }
+        try require(drained, "Committed log queue drains after release, including after stop")
+        let events = await logger.events
+        try require(events.map(\.0) == [.cpu, .memory, .network, .disk, .sensors,
+                                        .cpu, .memory, .network, .disk, .sensors],
+                    "Each sample logs five components in order")
+        try require(events.map(\.1) == Array(repeating: firstDate, count: 5)
+                    + Array(repeating: secondDate, count: 5),
+                    "Log events preserve sample commit order")
+    }
+
+    static func slowLoggerDoesNotDelayPublication() async throws {
+        let logger = GatedDiagnosticLogger()
+        let engine = MonitoringEngine(providers: providers(), logger: logger)
+        let stream = await engine.updates()
+        let published = CompletionFlag()
+        let received = Task {
+            var iterator = stream.makeAsyncIterator()
+            let update = await iterator.next()
+            await published.finish()
+            return update
+        }
+        await engine.start()
+        let entered = await waitUntil { await logger.isBlocked }
+        let publishedBeforeRelease = await waitUntil { await published.completed }
+        await engine.stop()
+        await logger.release()
+        let update = await received.value
+        try require(entered && publishedBeforeRelease && update != nil,
+                    "Stream publishes committed sample before logger is released")
+        let drained = await waitUntil { await logger.events.count == 5 }
+        try require(drained, "Stream sample remains queued for logging after stop")
+    }
+
+    static func staleSampleDoesNotLog() async throws {
+        let memory = GatedMemoryProvider()
+        let logger = FailingDiagnosticLogger()
+        let engine = MonitoringEngine(providers: providers(memory: memory), logger: logger)
+        let pending = Task { await engine.sample(at: Date(timeIntervalSince1970: 1)) }
+        while !(await memory.isSampling()) { await Task.yield() }
+        await engine.stop()
+        await memory.release()
+        let snapshot = await pending.value
+        let calls = await logger.callCount
+        try require(snapshot.cpuUsage.isUnavailable && calls == 0,
+                    "Stopped generation cannot enqueue diagnostics for an uncommitted sample")
+    }
+
+    static func loggerTailDoesNotRetainEngine() async throws {
+        let logger = GatedDiagnosticLogger()
+        var engine: MonitoringEngine? = MonitoringEngine(providers: providers(), logger: logger)
+        weak var weakEngine = engine
+        _ = await engine!.sample(at: Date(timeIntervalSince1970: 1))
+        let entered = await waitUntil { await logger.isBlocked }
+        engine = nil
+        let released = weakEngine == nil
+        await logger.release()
+        let drained = await waitUntil { await logger.events.count == 5 }
+        try require(entered && released && drained,
+                    "Queued diagnostics finish without retaining or blocking engine deinit")
+    }
+
     static func diagnosticLog() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("mac-resource-monitor-diagnostics-\(UUID().uuidString)")
@@ -213,11 +351,13 @@ private enum MonitoringChecks {
                                       logger: logger)
         let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
         let history = await engine.history
+        let logged = await waitUntil { await logger.callCount == 5 }
         let calls = await logger.callCount
         let outcomes = await logger.outcomes
         try require(snapshot.memory.isUnavailable && snapshot.disk.value?.usedBytes == 500,
                     "Logging failure does not change readings")
         try require(history.cpu.count == 1, "Logging failure does not discard committed history")
+        try require(logged, "Failed logger attempts eventually finish")
         try require(calls == 5, "Every collector outcome reaches logger after commit")
         try require(outcomes.map(\.0) == [.cpu, .memory, .network, .disk, .sensors],
                     "Engine reports each collector under its own component")
