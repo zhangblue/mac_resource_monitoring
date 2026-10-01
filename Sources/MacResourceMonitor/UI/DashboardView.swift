@@ -3,19 +3,28 @@ import SwiftUI
 
 struct DashboardView: View {
     @ObservedObject var store: MonitoringStore
+    @StateObject private var loginItemManager = LoginItemManager()
+    @State private var showingSettings = false
 
     private let columns = [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)]
 
     var body: some View {
+        Group {
+            if showingSettings {
+                SettingsView(loginItemManager: loginItemManager) {
+                    showingSettings = false
+                }
+            } else {
+                dashboard
+            }
+        }
+    }
+
+    private var dashboard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Mac 状态")
                     .font(.headline)
-                Spacer()
-                Button("退出应用") { NSApplication.shared.terminate(nil) }
-                    .buttonStyle(.plain)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             LazyVGrid(columns: columns, spacing: 12) {
@@ -37,6 +46,14 @@ struct DashboardView: View {
                                detail: thermalStatus(store.snapshot?.thermal.value?.fan != nil))
             }
             diskCard
+            HStack {
+                Button("设置") { showingSettings = true }
+                Spacer()
+                Button("退出应用") { NSApplication.shared.terminate(nil) }
+            }
+            .buttonStyle(.plain)
+            .font(.caption)
+            .foregroundStyle(.secondary)
         }
         .padding(16)
         .frame(width: 380)

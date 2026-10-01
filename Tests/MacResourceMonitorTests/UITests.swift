@@ -1,7 +1,90 @@
 import XCTest
+import ServiceManagement
 @testable import MacResourceMonitor
 
 final class UITests: XCTestCase {
+    @MainActor
+    func testLoginToggleRegistersWhenDisabled() throws {
+        let service = FakeLoginService(status: .notRegistered)
+        let manager = LoginItemManager(service: service)
+
+        try manager.setEnabled(true)
+
+        XCTAssertEqual(service.registerCount, 1)
+        XCTAssertTrue(manager.isEnabled)
+    }
+
+    @MainActor
+    func testLoginToggleUnregistersWhenEnabled() throws {
+        let service = FakeLoginService(status: .enabled)
+        let manager = LoginItemManager(service: service)
+
+        try manager.setEnabled(false)
+
+        XCTAssertEqual(service.unregisterCount, 1)
+        XCTAssertFalse(manager.isEnabled)
+    }
+
+    @MainActor
+    func testRepeatedToggleDoesNotRepeatRegistration() throws {
+        let service = FakeLoginService(status: .enabled)
+        let manager = LoginItemManager(service: service)
+
+        try manager.setEnabled(true)
+        try manager.setEnabled(false)
+        try manager.setEnabled(false)
+
+        XCTAssertEqual(service.registerCount, 0)
+        XCTAssertEqual(service.unregisterCount, 1)
+    }
+
+    @MainActor
+    func testRequiresApprovalCanBeUnregistered() throws {
+        let service = FakeLoginService(status: .requiresApproval)
+        let manager = LoginItemManager(service: service)
+        XCTAssertTrue(manager.isEnabled)
+
+        try manager.setEnabled(false)
+
+        XCTAssertEqual(service.unregisterCount, 1)
+        XCTAssertFalse(manager.isEnabled)
+    }
+
+    @MainActor
+    func testNotRegisteredToggleOffIsIdempotent() throws {
+        let service = FakeLoginService(status: .notRegistered)
+        let manager = LoginItemManager(service: service)
+
+        try manager.setEnabled(false)
+
+        XCTAssertEqual(service.unregisterCount, 0)
+        XCTAssertFalse(manager.isEnabled)
+    }
+
+    @MainActor
+    func testRegistrationFailureRestoresActualStatus() {
+        let service = FakeLoginService(status: .notRegistered)
+        service.registerError = LoginTestError.failed
+        let manager = LoginItemManager(service: service)
+
+        XCTAssertThrowsError(try manager.setEnabled(true))
+
+        XCTAssertEqual(service.registerCount, 1)
+        XCTAssertFalse(manager.isEnabled)
+    }
+
+    @MainActor
+    func testUnregistrationFailureRestoresActualStatus() {
+        let service = FakeLoginService(status: .enabled)
+        service.unregisterError = LoginTestError.failed
+        let manager = LoginItemManager(service: service)
+
+        XCTAssertThrowsError(try manager.setEnabled(false))
+
+        XCTAssertEqual(service.unregisterCount, 1)
+        XCTAssertTrue(manager.isEnabled)
+    }
+
     func testApplicationMetadataIsStable() {
         XCTAssertEqual(AppMetadata.bundleIdentifier, "com.local.MacResourceMonitor")
         XCTAssertEqual(AppMetadata.minimumSystemVersion, "13.0")
@@ -83,5 +166,30 @@ final class UITests: XCTestCase {
         XCTAssertEqual(MetricPresentation.temperatureStatus(for: nil), "等待下一次采样")
         let thermal = ThermalMetric(chipTemperatureCelsius: nil, fan: .fanless)
         XCTAssertEqual(MetricPresentation.temperatureStatus(for: .value(thermal)), "暂不可用")
+    }
+}
+
+private enum LoginTestError: Error { case failed }
+
+@MainActor
+private final class FakeLoginService: LoginService {
+    var status: SMAppService.Status
+    var registerCount = 0
+    var unregisterCount = 0
+    var registerError: Error?
+    var unregisterError: Error?
+
+    init(status: SMAppService.Status) { self.status = status }
+
+    func register() throws {
+        registerCount += 1
+        if let registerError { throw registerError }
+        status = .enabled
+    }
+
+    func unregister() throws {
+        unregisterCount += 1
+        if let unregisterError { throw unregisterError }
+        status = .notRegistered
     }
 }
