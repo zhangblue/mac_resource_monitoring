@@ -32,9 +32,6 @@ actor MonitoringEngine {
     private let logger: any DiagnosticLogging
     private var previousCPU: CPUTicks?
     private var networkCalculator = NetworkRateCalculator()
-    private var diskCalculator = DiskRateCalculator()
-    private var diskDriverID: UInt64?
-    private var diskBSDName: String?
     private var loop: Task<Void, Never>?
     private var generation = UUID()
     private var sampling: Task<MonitoringUpdate, Never>?
@@ -91,9 +88,6 @@ actor MonitoringEngine {
         samplingID = nil
         previousCPU = nil
         networkCalculator = NetworkRateCalculator()
-        diskCalculator = DiskRateCalculator()
-        diskDriverID = nil
-        diskBSDName = nil
         let continuations = Array(subscribers.values)
         subscribers.removeAll()
         continuations.forEach { $0.finish() }
@@ -155,7 +149,7 @@ actor MonitoringEngine {
     }
 
     private typealias ProviderReadings = (Reading<CPUTicks>, Reading<MemoryMetric>, Reading<NetworkCounters>,
-                                         Reading<DiskCounters>, Reading<ThermalMetric>)
+                                         Reading<DiskMetric>, Reading<ThermalMetric>)
 
     private static func collect(_ providers: ProviderSet) async -> ProviderReadings {
         async let cpu = Self.read { try await providers.cpu.sample() }
@@ -174,7 +168,7 @@ actor MonitoringEngine {
 
         let snapshot = MetricSnapshot(timestamp: date, cpuUsage: cpuUsage(readings.0),
                                       memory: readings.1, network: networkMetric(readings.2, at: date),
-                                      thermal: readings.4, disk: diskMetric(readings.3, at: date))
+                                      thermal: readings.4, disk: readings.3)
         history.append(snapshot)
         enqueueDiagnostics(readings, at: date)
         return MonitoringUpdate(snapshot: snapshot, history: history)
@@ -231,26 +225,6 @@ actor MonitoringEngine {
         case let .value(counters):
             return .value(networkCalculator.update(counters, at: date)
                           ?? NetworkMetric(downloadBytesPerSecond: nil, uploadBytesPerSecond: nil))
-        }
-    }
-
-    private func diskMetric(_ reading: Reading<DiskCounters>, at date: Date) -> Reading<DiskMetric> {
-        switch reading {
-        case let .unavailable(reason):
-            diskCalculator = DiskRateCalculator()
-            diskDriverID = nil
-            diskBSDName = nil
-            return .unavailable(reason)
-        case let .value(counters):
-            if counters.driverID != diskDriverID || counters.bsdName != diskBSDName {
-                diskCalculator = DiskRateCalculator()
-            }
-            diskDriverID = counters.driverID
-            diskBSDName = counters.bsdName
-            let rates = diskCalculator.update(read: counters.read, written: counters.written, at: date)
-            return .value(DiskMetric(readBytesPerSecond: rates?.readBytesPerSecond,
-                                     writeBytesPerSecond: rates?.writeBytesPerSecond,
-                                     usedBytes: counters.usedBytes, totalBytes: counters.totalBytes))
         }
     }
 }

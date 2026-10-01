@@ -13,7 +13,7 @@ protocol NetworkProviding: Sendable {
 }
 
 protocol DiskProviding: Sendable {
-    func sample() async throws -> DiskCounters
+    func sample() async throws -> DiskMetric
 }
 
 protocol SensorProviding: Sendable {

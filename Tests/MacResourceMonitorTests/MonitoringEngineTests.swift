@@ -16,8 +16,12 @@ final class MonitoringEngineTests: XCTestCase {
         try await MonitoringChecks.historyCapacity()
     }
 
-    func testDiskDriverChangeRebuildsRateBaseline() async throws {
-        try await MonitoringChecks.diskDriverChange()
+    func testDiskCapacityIsAvailableOnEverySample() async throws {
+        try await MonitoringChecks.diskCapacityEverySample()
+    }
+
+    func testDiskCapacityFailureIsIsolatedAndLogged() async throws {
+        try await MonitoringChecks.diskCapacityFailureIsolation()
     }
 
     func testStartIsIdempotentAndStopEndsPublication() async throws {
@@ -82,7 +86,8 @@ enum MonitoringHarness {
         try await MonitoringChecks.streamLifetime()
         try await MonitoringChecks.failureIsolation()
         try await MonitoringChecks.historyCapacity()
-        try await MonitoringChecks.diskDriverChange()
+        try await MonitoringChecks.diskCapacityEverySample()
+        try await MonitoringChecks.diskCapacityFailureIsolation()
         try await MonitoringChecks.lifecycle()
         try await MonitoringChecks.stopDuringSample()
         try await MonitoringChecks.storeLifetime()
@@ -172,15 +177,14 @@ private struct FakeNetworkProvider: NetworkProviding {
 }
 
 private struct FailingDiskProvider: DiskProviding {
-    func sample() throws -> DiskCounters { throw MonitoringTestError.failed }
+    func sample() throws -> DiskMetric { throw MonitoringTestError.failed }
 }
 
 private actor FakeDiskProvider: DiskProviding {
     private var step: UInt64 = 0
-    func sample() -> DiskCounters {
+    func sample() -> DiskMetric {
         step += 1
-        return DiskCounters(read: step * 100, written: step * 50, usedBytes: 500,
-                            totalBytes: 1_000, bsdName: "disk3s1", driverID: step < 3 ? 1 : 2)
+        return DiskMetric(usedBytes: 500 + step, totalBytes: 1_000)
     }
 }
 
@@ -354,7 +358,7 @@ private enum MonitoringChecks {
         let logged = await waitUntil { await logger.callCount == 5 }
         let calls = await logger.callCount
         let outcomes = await logger.outcomes
-        try require(snapshot.memory.isUnavailable && snapshot.disk.value?.usedBytes == 500,
+        try require(snapshot.memory.isUnavailable && snapshot.disk.value?.usedBytes == 501,
                     "Logging failure does not change readings")
         try require(history.cpu.count == 1, "Logging failure does not discard committed history")
         try require(logged, "Failed logger attempts eventually finish")
@@ -384,7 +388,7 @@ private enum MonitoringChecks {
         let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
         try require(snapshot.cpuUsage.value == 0.3, "CPU survives memory failure")
         try require(snapshot.memory.isUnavailable, "Memory error is unavailable")
-        try require(snapshot.disk.value?.usedBytes == 500, "Disk capacity survives memory failure")
+        try require(snapshot.disk.value?.usedBytes == 502, "Disk capacity survives memory failure")
         try require(snapshot.thermal.value?.fan == .fanless, "Fanless state survives nil temperature")
         try require(snapshot.thermal.value?.chipTemperatureCelsius == nil, "Unknown temperature stays nil")
         let failedSensors = makeEngine(providers: providers(memory: FakeMemoryProvider(fails: false),
@@ -420,16 +424,32 @@ private enum MonitoringChecks {
         try require(history.upload.elements.last?.value == 0, "Measured idle network is zero")
     }
 
-    // Fails if equal BSD names mask a changed underlying storage driver.
-    static func diskDriverChange() async throws {
+    // Fails if disk capacity is delayed for a rate baseline or reused from a previous sample.
+    static func diskCapacityEverySample() async throws {
         let engine = makeEngine(providers: providers())
         var samples: [MetricSnapshot] = []
-        for second in 1...4 { samples.append(await engine.sample(at: Date(timeIntervalSince1970: Double(second)))) }
-        try require(samples[0].disk.value?.readBytesPerSecond == nil, "First disk sample establishes baseline")
-        try require(samples[1].disk.value?.readBytesPerSecond == 100, "Stable driver computes delta")
-        try require(samples[2].disk.value?.readBytesPerSecond == nil, "Changed driver rebuilds baseline")
-        try require(samples[2].disk.value?.usedBytes == 500, "Baseline reset preserves capacity")
-        try require(samples[3].disk.value?.writeBytesPerSecond == 50, "New driver resumes rate calculation")
+        for second in 1...3 { samples.append(await engine.sample(at: Date(timeIntervalSince1970: Double(second)))) }
+        try require(samples.map { $0.disk.value?.usedBytes } == [501, 502, 503],
+                    "Every sample publishes current disk capacity")
+        try require(samples.allSatisfy { $0.disk.value?.totalBytes == 1_000 },
+                    "Disk total capacity remains available from the first sample")
+    }
+
+    // Fails if a capacity read error cancels peer readings or is logged as a success.
+    static func diskCapacityFailureIsolation() async throws {
+        let logger = FailingDiagnosticLogger()
+        let engine = MonitoringEngine(providers: ProviderSet(
+            cpu: AdvancingCPUProvider(), memory: FakeMemoryProvider(fails: false),
+            network: FakeNetworkProvider(), disk: FailingDiskProvider(), sensors: FakeSensorProvider()
+        ), logger: logger)
+        let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        let logged = await waitUntil { await logger.callCount == 5 }
+        let outcomes = await logger.outcomes
+        try require(snapshot.disk.isUnavailable, "Failed disk capacity read becomes unavailable")
+        try require(snapshot.memory.value?.usedBytes == 500 && snapshot.thermal.value?.fan == .fanless,
+                    "Disk failure leaves independent metrics available")
+        try require(logged && outcomes.map(\.1) == [false, false, false, true, false],
+                    "Diagnostic log marks only disk collection as failed")
     }
 
     // Fails if start creates duplicate loops, stop keeps publishing, or restart cannot subscribe.

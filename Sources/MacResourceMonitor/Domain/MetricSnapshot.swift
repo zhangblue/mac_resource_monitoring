@@ -39,8 +39,6 @@ struct ThermalMetric: Equatable, Sendable {
 }
 
 struct DiskMetric: Equatable, Sendable {
-    let readBytesPerSecond: Double?
-    let writeBytesPerSecond: Double?
     let usedBytes: UInt64
     let totalBytes: UInt64
 }

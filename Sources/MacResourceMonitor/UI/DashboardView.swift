@@ -61,16 +61,11 @@ struct DashboardView: View {
 
     private var diskCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("磁盘")
+            Text("磁盘使用量")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack {
-                diskValue("读取", disk.readRate)
-                Spacer()
-                diskValue("写入", disk.writeRate)
-            }
-            if !disk.rateStatus.isEmpty {
-                Text(disk.rateStatus)
+            if !disk.status.isEmpty {
+                Text(disk.status)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -90,17 +85,6 @@ struct DashboardView: View {
     }
 
     private var disk: DiskPresentation { DiskPresentation(reading: store.snapshot?.disk) }
-
-    private func diskValue(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.caption2).foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(size: 18, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .lineLimit(1)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
 
     private func percent(_ reading: Reading<Double>?) -> String {
         guard let value = reading?.value else { return "—" }

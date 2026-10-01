@@ -142,24 +142,23 @@ final class UITests: XCTestCase {
         XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.value(0.2)), "最近五分钟")
     }
 
-    func testDiskKeepsCapacityWhenInitialRatesAreMissing() {
-        let disk = DiskMetric(readBytesPerSecond: nil, writeBytesPerSecond: nil,
-                              usedBytes: 25, totalBytes: 100)
+    func testDiskDisplaysOnlyCapacityFromFirstSample() {
+        let disk = DiskMetric(usedBytes: 25, totalBytes: 100)
         let model = DiskPresentation(reading: .value(disk))
-        XCTAssertEqual(model.readRate, "—")
-        XCTAssertEqual(model.writeRate, "—")
-        XCTAssertEqual(model.rateStatus, "等待下一次采样")
         XCTAssertEqual(model.capacityText, "已用 25 B / 100 B")
         XCTAssertEqual(model.usedFraction, 0.25)
     }
 
     func testDiskCapacityFractionHandlesZeroAndOverflow() {
-        let zero = DiskMetric(readBytesPerSecond: 0, writeBytesPerSecond: 0,
-                              usedBytes: 10, totalBytes: 0)
-        let overflow = DiskMetric(readBytesPerSecond: 0, writeBytesPerSecond: 0,
-                                  usedBytes: 125, totalBytes: 100)
+        let zero = DiskMetric(usedBytes: 10, totalBytes: 0)
+        let overflow = DiskMetric(usedBytes: 125, totalBytes: 100)
         XCTAssertEqual(DiskPresentation(reading: .value(zero)).usedFraction, 0)
         XCTAssertEqual(DiskPresentation(reading: .value(overflow)).usedFraction, 1)
+    }
+
+    func testDiskUnavailableAndPendingCapacityStates() {
+        XCTAssertEqual(DiskPresentation(reading: nil).status, "等待下一次采样")
+        XCTAssertEqual(DiskPresentation(reading: .unavailable("capacity read failed")).status, "暂不可用")
     }
 
     func testTemperatureMissingAfterSnapshotIsUnavailable() {

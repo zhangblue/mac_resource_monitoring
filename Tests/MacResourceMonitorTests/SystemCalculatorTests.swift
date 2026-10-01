@@ -103,27 +103,6 @@ final class SystemCalculatorTests: XCTestCase {
         }
     }
 
-    func testDiskRateDropsCounterReset() {
-        var calculator = DiskRateCalculator()
-        _ = calculator.update(read: 1_000, written: 2_000, at: .init(timeIntervalSince1970: 0))
-        XCTAssertNil(calculator.update(read: 100, written: 200, at: .init(timeIntervalSince1970: 1)))
-    }
-
-    func testDiskRateUsesElapsedSecondsAndRebuildsAfterInvalidSample() {
-        var calculator = DiskRateCalculator()
-        XCTAssertNil(calculator.update(read: 100, written: 100, at: .init(timeIntervalSince1970: 0)))
-        XCTAssertEqual(
-            calculator.update(read: 300, written: 500, at: .init(timeIntervalSince1970: 2)),
-            DiskRates(readBytesPerSecond: 100, writeBytesPerSecond: 200)
-        )
-        XCTAssertNil(calculator.update(read: 400, written: 600, at: .init(timeIntervalSince1970: 13)))
-        XCTAssertNil(calculator.update(read: 100_000_000_401, written: 601, at: .init(timeIntervalSince1970: 14)))
-        XCTAssertEqual(
-            calculator.update(read: 100_000_000_411, written: 611, at: .init(timeIntervalSince1970: 15)),
-            DiskRates(readBytesPerSecond: 10, writeBytesPerSecond: 10)
-        )
-    }
-
     func testDiskCapacityRejectsMissingFreeSpace() {
         XCTAssertThrowsError(try DiskCapacity.from([.systemSize: NSNumber(value: 1_000)])) { error in
             guard case DiskProviderError.capacityUnavailable = error else {
@@ -141,40 +120,17 @@ final class SystemCalculatorTests: XCTestCase {
         XCTAssertEqual(capacity.totalBytes, 1_000)
     }
 
-    func testDiskDriverSelectionRequiresOneUniqueIdentity() throws {
-        XCTAssertEqual(try DiskDriverSelection.uniqueID(from: [17, 17], bsdName: "disk3s1"), 17)
-        XCTAssertThrowsError(try DiskDriverSelection.uniqueID(from: [], bsdName: "disk3s1")) { error in
-            guard case let DiskProviderError.storageDriverNotFound(name) = error else {
-                return XCTFail("Expected no driver error")
-            }
-            XCTAssertEqual(name, "disk3s1")
-        }
-        XCTAssertThrowsError(try DiskDriverSelection.uniqueID(from: [17, 42], bsdName: "disk3s1")) { error in
-            guard case let DiskProviderError.ambiguousStorageDrivers(name, identifiers) = error else {
-                return XCTFail("Expected ambiguous driver error")
-            }
-            XCTAssertEqual(name, "disk3s1")
-            XCTAssertEqual(identifiers, [17, 42])
-        }
+    func testDiskCapacityRejectsFreeSpaceAboveTotal() {
+        XCTAssertThrowsError(try DiskCapacity.from([
+            .systemSize: NSNumber(value: 1_000), .systemFreeSize: NSNumber(value: 1_001)
+        ]))
     }
 
-    func testDiskCountersExposePhysicalDriverIdentity() {
-        let first = DiskCounters(read: 100, written: 200, usedBytes: 10, totalBytes: 20,
-                                 bsdName: "disk3s1", driverID: 17)
-        let second = DiskCounters(read: 100, written: 200, usedBytes: 10, totalBytes: 20,
-                                  bsdName: "disk3s1", driverID: 42)
-        XCTAssertNotEqual(first, second)
-    }
-
-    func testRateRejectsOneHundredGigabytesPerSecondBoundary() {
+    func testNetworkRateRejectsOneHundredGigabytesPerSecondBoundary() {
         let start = Date(timeIntervalSince1970: 0)
         let next = Date(timeIntervalSince1970: 1)
         var network = NetworkRateCalculator()
         _ = network.update(.init(received: 0, sent: 0, interfaces: ["en0"]), at: start)
         XCTAssertNil(network.update(.init(received: 100_000_000_000, sent: 0, interfaces: ["en0"]), at: next))
-
-        var disk = DiskRateCalculator()
-        _ = disk.update(read: 0, written: 0, at: start)
-        XCTAssertNil(disk.update(read: 0, written: 100_000_000_000, at: next))
     }
 }

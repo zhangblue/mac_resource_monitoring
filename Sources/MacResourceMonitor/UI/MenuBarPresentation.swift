@@ -97,33 +97,24 @@ enum MetricPresentation {
 }
 
 struct DiskPresentation {
-    let readRate: String
-    let writeRate: String
-    let rateStatus: String
+    let status: String
     let capacityText: String
     let usedFraction: Double?
 
     init(reading: Reading<DiskMetric>?) {
         guard let reading else {
-            readRate = "—"
-            writeRate = "—"
-            rateStatus = "等待下一次采样"
+            status = "等待下一次采样"
             capacityText = "—"
             usedFraction = nil
             return
         }
         switch reading {
         case .unavailable:
-            readRate = "—"
-            writeRate = "—"
-            rateStatus = "暂不可用"
+            status = "暂不可用"
             capacityText = "—"
             usedFraction = nil
         case let .value(disk):
-            readRate = disk.readBytesPerSecond.map(MetricFormatter.rate) ?? "—"
-            writeRate = disk.writeBytesPerSecond.map(MetricFormatter.rate) ?? "—"
-            rateStatus = disk.readBytesPerSecond == nil || disk.writeBytesPerSecond == nil
-                ? "等待下一次采样" : ""
+            status = ""
             capacityText = "已用 \(MetricFormatter.memory(disk.usedBytes)) / \(MetricFormatter.memory(disk.totalBytes))"
             usedFraction = disk.totalBytes == 0
                 ? 0 : min(Double(disk.usedBytes) / Double(disk.totalBytes), 1)
