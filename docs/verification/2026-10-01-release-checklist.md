@@ -1,6 +1,6 @@
 # Mac Resource Monitor 1.0 发布验收记录
 
-验收日期：2026-10-01
+验收日期：2026-10-01；图标与动态纵轴回归：2026-10-02
 
 测试机：Mac mini（Mac16,11，Apple M4 Pro，24 GB 内存）
 
@@ -11,10 +11,26 @@
 ## 结论摘要
 
 - **已验证**：完整 XCTest 测试套件、arm64 Release 构建、应用包结构、ad-hoc 签名、DMG 完整性及只读挂载内容、应用启动冒烟检查、严格并发同源监控及采样边界 harness、磁盘容量同源 harness、根卷容量读取和磁盘 capacity-only 展示逻辑。采样边界验证包含真实 Mach 端口引用计数，以及模拟工作区睡眠/唤醒通知。
-- **测试工具链**：Xcode 26.3（Build 17C529）、Apple Swift 6.2.4；`swift test` 共执行 82 项 XCTest，0 失败。
+- **测试工具链**：Xcode 26.3（Build 17C529）、Apple Swift 6.2.4；2026-10-02 在允许写入功能工作树与 Swift 缓存的环境重新执行 `swift test`，共 92 项 XCTest，0 失败。
 - **未验证**：真实拖入 `/Applications` 的完整安装/卸载流程、首次右键打开及 Gatekeeper 提示、登录项开关、界面视觉与 Dock 状态、高负载/下载/大文件复制、睡眠唤醒和网络接口切换。发布前应在目标 Mac 上补做这些交互场景。
 
 ## 自动化与构建验证
+
+### 2026-10-02 图标与动态纵轴最终回归
+
+| 项目 | 状态 | 本轮证据 |
+| --- | --- | --- |
+| 完整测试 | **已验证** | `swift test` 退出 0；92 项 XCTest，0 失败、0 unexpected，约 5.15 秒。首次受限沙箱运行退出 1，出现缓存不可写及只读构建数据库；该次不能作为通过证据。 |
+| Release 与干净产物重建 | **已验证** | `swift build -c release --arch arm64`、`swift package clean`、`bash scripts/build-app.sh`、`bash scripts/build-dmg.sh`、`bash scripts/verify-release.sh` 依次执行，全部退出 0；清理后重新编译并重建 app bundle 和 DMG。 |
+| 最终应用元数据、架构与签名 | **已验证** | 发布脚本同时检查 dist 与只读 DMG 内应用：macOS `13.0`、`LSUIElement=true`、thin arm64、`Signature=adhoc`、严格签名校验。发布未经公证。 |
+| 图标源图与包内资源 | **已验证** | `sips` 核对源图为 1024×1024 且有 alpha；最终 DMG 内 `CFBundleIconFile=AppIcon.icns`，资源 SHA-256 与仓库一致：`7a69666a6e40bf3e3edcf4756e55c47332400af43085132950b8cd6b784922e1`。 |
+| Finder / 应用信息图标 | **已验证（最终 DMG 内应用）** | Finder 打开 `/Volumes/Mac Resource Monitor 1/MacResourceMonitor.app` 的“显示简介”；可访问性信息确认来源为本轮最终 DMG，截图顶部小图标和预览均显示蓝色圆角折线图标。深色背景正常预览尺寸未见白色方底或可辨认顶部淡边。未实际安装到 `/Applications`，安装后图标未验证。 |
+| DMG 范围 | **已验证** | 根目录仅应用、`Applications -> /Applications` 和 `INSTALL.md`；未添加 `.VolumeIcon.icns` 或专用卷图标。 |
+| 四图动态三档纵轴与低 CPU 波动 | **已验证（逻辑）/未验证（实际面板）** | 8 项纵轴测试和 2 项可见窗口轴测试通过；源码 CPU、内存、上传、下载均使用动态 domain 与三档 ticks。低 CPU 窄范围测试通过。不能据此宣称真实面板 CPU 起伏、标签裁切或浅/深色可读性通过。 |
+| 真机启动和退出 | **已验证（进程冒烟）/未验证（菜单栏视觉）** | 从最终 `dist/MacResourceMonitor.app` 启动并核对进程。CUA 连接菜单栏应用返回 `timeoutReached`，未取得弹窗；菜单栏无时间、四图、传感器、磁盘容量及 Dock 视觉继续待补验。检查后结束本轮应用进程并确认无残留。 |
+| Git | **已验证** | `git diff --check` 退出 0；`build/`、`dist/` 被忽略且 `git ls-files build dist` 无输出。 |
+
+下表中 2026-10-01 的 harness 及历史验证记录保留作为既有证据，不代表本轮重新执行；本轮发布产物以上表和交付物数据为准。
 
 | 项目 | 状态 | 证据 |
 | --- | --- | --- |
@@ -61,9 +77,9 @@
 
 ## 交付物
 
-- DMG：`/Users/zhangdi/works/workspace/github/mac_resource_monitoring/dist/MacResourceMonitor.dmg`
-- 大小：426809 bytes（约 416.8 KiB，使用 Xcode 26.3 工具链重建）
-- SHA-256：`3bca15731f37b6676cd9d062cefcc3a1dd6548c8b5592abc15b12091e690018d`
+- DMG：`/Users/zhangdi/.codex/worktrees/app-icon-dynamic-axis/mac_resource_monitoring/dist/MacResourceMonitor.dmg`
+- 大小：2296026 bytes（约 2.19 MiB，2026-10-02 干净重建）
+- SHA-256：`de227e1b60ca4571c94b5fbb4d1de2e418a53bbc582ffbdc7c9be147cd4fbc7a`
 - 签名：ad-hoc
 - 公证：未公证
 
