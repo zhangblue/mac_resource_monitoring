@@ -8,10 +8,13 @@ enum AppMetadata {
 
 @main
 struct MacResourceMonitorApp: App {
+    @StateObject private var store = MonitoringStore()
+
     var body: some Scene {
-        MenuBarExtra("Mac 状态", systemImage: "gauge.with.dots.needle.67percent") {
-            Text("Mac 状态")
-            Button("退出应用") { NSApplication.shared.terminate(nil) }
+        MenuBarExtra {
+            DashboardView(store: store)
+        } label: {
+            MenuBarLabelView(store: store)
         }
         .menuBarExtraStyle(.window)
     }
