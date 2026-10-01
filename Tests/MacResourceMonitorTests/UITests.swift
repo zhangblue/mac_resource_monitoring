@@ -162,6 +162,22 @@ final class UITests: XCTestCase {
         XCTAssertEqual(presentation.segments.map(\.count), [1, 1])
     }
 
+    func testSparklineClockRollbackExcludesFuturePeakAndIncludesWindowBoundary() throws {
+        let presentation = SparklinePresentation(points: [
+            HistoryPoint(timestamp: Date(timeIntervalSince1970: 698), value: 0.9),
+            HistoryPoint(timestamp: Date(timeIntervalSince1970: 699), value: 0.03),
+            HistoryPoint(timestamp: Date(timeIntervalSince1970: 1000), value: 1),
+            HistoryPoint(timestamp: Date(timeIntervalSince1970: 999), value: 0.02)
+        ])
+
+        XCTAssertEqual(presentation.visibleValues, [0.03, 0.02])
+        XCTAssertEqual(presentation.segments.map(\.count), [1, 1])
+        XCTAssertEqual(presentation.segments.map { $0[0].timestamp.timeIntervalSince1970 }, [699, 999])
+        let axis = try XCTUnwrap(SparklineAxisPresentation(values: presentation.visibleValues, kind: .percentage))
+        XCTAssertEqual(axis.domain.lowerBound, 0)
+        XCTAssertEqual(axis.domain.upperBound, 0.10, accuracy: 0.000_001)
+    }
+
     func testPresentationDistinguishesWaitingFromUnavailable() {
         XCTAssertEqual(MetricPresentation.status(for: Optional<Reading<Double>>.none), "等待下一次采样")
         XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.unavailable("等待 CPU 采样基线")), "等待下一次采样")
