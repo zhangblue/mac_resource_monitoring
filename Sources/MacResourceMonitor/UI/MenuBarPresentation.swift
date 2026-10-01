@@ -83,4 +83,50 @@ enum MetricPresentation {
             return reason == "等待 CPU 采样基线" ? "等待下一次采样" : "暂不可用"
         }
     }
+
+    static func temperatureStatus(for reading: Reading<ThermalMetric>?) -> String {
+        guard let reading else { return "等待下一次采样" }
+        switch reading {
+        case .unavailable: return "暂不可用"
+        case let .value(thermal):
+            guard let temperature = thermal.chipTemperatureCelsius,
+                  temperature.isFinite else { return "暂不可用" }
+            return ""
+        }
+    }
+}
+
+struct DiskPresentation {
+    let readRate: String
+    let writeRate: String
+    let rateStatus: String
+    let capacityText: String
+    let usedFraction: Double?
+
+    init(reading: Reading<DiskMetric>?) {
+        guard let reading else {
+            readRate = "—"
+            writeRate = "—"
+            rateStatus = "等待下一次采样"
+            capacityText = "—"
+            usedFraction = nil
+            return
+        }
+        switch reading {
+        case .unavailable:
+            readRate = "—"
+            writeRate = "—"
+            rateStatus = "暂不可用"
+            capacityText = "—"
+            usedFraction = nil
+        case let .value(disk):
+            readRate = disk.readBytesPerSecond.map(MetricFormatter.rate) ?? "—"
+            writeRate = disk.writeBytesPerSecond.map(MetricFormatter.rate) ?? "—"
+            rateStatus = disk.readBytesPerSecond == nil || disk.writeBytesPerSecond == nil
+                ? "等待下一次采样" : ""
+            capacityText = "已用 \(MetricFormatter.memory(disk.usedBytes)) / \(MetricFormatter.memory(disk.totalBytes))"
+            usedFraction = disk.totalBytes == 0
+                ? 0 : min(Double(disk.usedBytes) / Double(disk.totalBytes), 1)
+        }
+    }
 }

@@ -32,12 +32,11 @@ struct DashboardView: View {
                                detail: networkStatus(store.snapshot?.network.value?.downloadBytesPerSecond),
                                points: store.history.download.elements)
                 MetricCardView(title: "芯片温度", value: temperature,
-                               detail: thermalStatus(store.snapshot?.thermal.value?.chipTemperatureCelsius != nil))
+                               detail: MetricPresentation.temperatureStatus(for: store.snapshot?.thermal))
                 MetricCardView(title: "风扇", value: fan,
                                detail: thermalStatus(store.snapshot?.thermal.value?.fan != nil))
-                diskCard
-                    .gridCellColumns(2)
             }
+            diskCard
         }
         .padding(16)
         .frame(width: 380)
@@ -49,11 +48,22 @@ struct DashboardView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {
-                diskValue("读取", store.snapshot?.disk.value?.readBytesPerSecond)
+                diskValue("读取", disk.readRate)
                 Spacer()
-                diskValue("写入", store.snapshot?.disk.value?.writeBytesPerSecond)
+                diskValue("写入", disk.writeRate)
             }
-            Text(diskDetail)
+            if !disk.rateStatus.isEmpty {
+                Text(disk.rateStatus)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let fraction = disk.usedFraction {
+                ProgressView(value: fraction)
+                    .progressViewStyle(.linear)
+                    .accessibilityLabel("磁盘容量使用率")
+                    .accessibilityValue(MetricFormatter.percent(fraction * 100))
+            }
+            Text(disk.capacityText)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -62,10 +72,12 @@ struct DashboardView: View {
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
     }
 
-    private func diskValue(_ title: String, _ bytes: Double?) -> some View {
+    private var disk: DiskPresentation { DiskPresentation(reading: store.snapshot?.disk) }
+
+    private func diskValue(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title).font(.caption2).foregroundStyle(.secondary)
-            Text(rate(bytes))
+            Text(value)
                 .font(.system(size: 18, weight: .semibold, design: .rounded))
                 .monospacedDigit()
                 .lineLimit(1)
@@ -115,11 +127,4 @@ struct DashboardView: View {
         return available ? "" : "等待下一次采样"
     }
 
-    private var diskDetail: String {
-        guard let disk = store.snapshot?.disk.value else { return MetricPresentation.status(for: store.snapshot?.disk) }
-        guard disk.readBytesPerSecond != nil || disk.writeBytesPerSecond != nil else {
-            return "等待下一次采样"
-        }
-        return "已用 \(MetricFormatter.memory(disk.usedBytes)) / \(MetricFormatter.memory(disk.totalBytes))"
-    }
 }

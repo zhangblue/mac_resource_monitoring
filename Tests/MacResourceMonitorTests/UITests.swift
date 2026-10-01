@@ -58,4 +58,30 @@ final class UITests: XCTestCase {
         XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.unavailable("read failed")), "暂不可用")
         XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.value(0.2)), "最近五分钟")
     }
+
+    func testDiskKeepsCapacityWhenInitialRatesAreMissing() {
+        let disk = DiskMetric(readBytesPerSecond: nil, writeBytesPerSecond: nil,
+                              usedBytes: 25, totalBytes: 100)
+        let model = DiskPresentation(reading: .value(disk))
+        XCTAssertEqual(model.readRate, "—")
+        XCTAssertEqual(model.writeRate, "—")
+        XCTAssertEqual(model.rateStatus, "等待下一次采样")
+        XCTAssertEqual(model.capacityText, "已用 25 B / 100 B")
+        XCTAssertEqual(model.usedFraction, 0.25)
+    }
+
+    func testDiskCapacityFractionHandlesZeroAndOverflow() {
+        let zero = DiskMetric(readBytesPerSecond: 0, writeBytesPerSecond: 0,
+                              usedBytes: 10, totalBytes: 0)
+        let overflow = DiskMetric(readBytesPerSecond: 0, writeBytesPerSecond: 0,
+                                  usedBytes: 125, totalBytes: 100)
+        XCTAssertEqual(DiskPresentation(reading: .value(zero)).usedFraction, 0)
+        XCTAssertEqual(DiskPresentation(reading: .value(overflow)).usedFraction, 1)
+    }
+
+    func testTemperatureMissingAfterSnapshotIsUnavailable() {
+        XCTAssertEqual(MetricPresentation.temperatureStatus(for: nil), "等待下一次采样")
+        let thermal = ThermalMetric(chipTemperatureCelsius: nil, fan: .fanless)
+        XCTAssertEqual(MetricPresentation.temperatureStatus(for: .value(thermal)), "暂不可用")
+    }
 }
