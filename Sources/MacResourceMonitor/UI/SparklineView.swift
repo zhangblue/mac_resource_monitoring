@@ -35,12 +35,11 @@ struct SparklineView: View {
     let style: SparklineStyle
     let emptyMessage: String
 
-    private var segments: [[HistoryPoint]] { SparklinePresentation(points: points).segments }
-    private var axis: SparklineAxisPresentation? {
-        SparklineAxisPresentation(values: points.compactMap(\.value), kind: style.axisKind)
-    }
-
     var body: some View {
+        let presentation = SparklinePresentation(points: points)
+        let segments = presentation.segments
+        let axis = SparklineAxisPresentation(values: presentation.visibleValues, kind: style.axisKind)
+
         Group {
             if segments.isEmpty || axis == nil {
                 HStack(spacing: 6) {

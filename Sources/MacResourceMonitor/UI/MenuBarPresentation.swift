@@ -57,6 +57,8 @@ private extension Reading where Value == Double? {
 struct SparklinePresentation {
     let segments: [[HistoryPoint]]
 
+    var visibleValues: [Double] { segments.flatMap { $0.compactMap(\.value) } }
+
     init(points: [HistoryPoint]) {
         var segments: [[HistoryPoint]] = []
         var current: [HistoryPoint] = []

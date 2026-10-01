@@ -135,6 +135,33 @@ final class UITests: XCTestCase {
         XCTAssertEqual(SparklinePresentation(points: points).segments[0][0].value, 0.2)
     }
 
+    func testSparklineAxisIgnoresPeakOutsideVisibleWindow() throws {
+        let start = Date(timeIntervalSince1970: 0)
+        let presentation = SparklinePresentation(points: [
+            HistoryPoint(timestamp: start, value: 1),
+            HistoryPoint(timestamp: start.addingTimeInterval(301), value: 0.02)
+        ])
+
+        XCTAssertEqual(presentation.visibleValues, [0.02])
+        let axis = try XCTUnwrap(SparklineAxisPresentation(values: presentation.visibleValues, kind: .percentage))
+        XCTAssertEqual(axis.domain.lowerBound, 0)
+        XCTAssertEqual(axis.domain.upperBound, 0.10, accuracy: 0.000_001)
+    }
+
+    func testSparklineAxisValuesUseOnlyFiniteVisibleSegments() {
+        let start = Date(timeIntervalSince1970: 0)
+        let presentation = SparklinePresentation(points: [
+            HistoryPoint(timestamp: start, value: 100_000_000),
+            HistoryPoint(timestamp: start.addingTimeInterval(301), value: 1024),
+            HistoryPoint(timestamp: start.addingTimeInterval(302), value: nil),
+            HistoryPoint(timestamp: start.addingTimeInterval(303), value: .nan),
+            HistoryPoint(timestamp: start.addingTimeInterval(304), value: 2048)
+        ])
+
+        XCTAssertEqual(presentation.visibleValues, [1024, 2048])
+        XCTAssertEqual(presentation.segments.map(\.count), [1, 1])
+    }
+
     func testPresentationDistinguishesWaitingFromUnavailable() {
         XCTAssertEqual(MetricPresentation.status(for: Optional<Reading<Double>>.none), "等待下一次采样")
         XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.unavailable("等待 CPU 采样基线")), "等待下一次采样")
