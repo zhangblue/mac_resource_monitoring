@@ -27,6 +27,10 @@ check_app() {
     test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = '1' || fail "incorrect bundle version: $bundle"
     test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")" = '13.0' || fail "incorrect minimum macOS version: $bundle"
     test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = true || fail "LSUIElement must be true: $bundle"
+    local icon_name
+    icon_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$plist")" || fail "missing CFBundleIconFile: $bundle"
+    [[ "$icon_name" == *.icns ]] || icon_name="$icon_name.icns"
+    test -f "$bundle/Contents/Resources/$icon_name" || fail "missing application icon: $bundle"
     local binary_details
     binary_details="$(file "$binary")" || fail "cannot inspect executable: $binary"
     [[ "$binary_details" == *arm64* ]] || fail "binary is not arm64: $binary"
