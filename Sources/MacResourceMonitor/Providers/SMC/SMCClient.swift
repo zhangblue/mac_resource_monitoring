@@ -100,9 +100,7 @@ final class SMCClient: SMCTransport, @unchecked Sendable {
         guard outputSize == MemoryLayout<SMCKeyData>.stride else {
             throw SMCError.invalidResponseSize(outputSize)
         }
-        guard response.result == 0 else {
-            throw SMCError.deviceFailure(command: command.rawValue, result: response.result)
-        }
+        try SMCResponseValidation.check(command: command.rawValue, result: response.result, status: response.status)
         return response
     }
 }

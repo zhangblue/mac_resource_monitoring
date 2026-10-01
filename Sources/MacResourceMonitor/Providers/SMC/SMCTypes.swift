@@ -16,12 +16,23 @@ enum SMCError: Error {
     case invalidLayout
     case serviceUnavailable
     case ioFailure(operation: String, code: Int32)
-    case deviceFailure(command: UInt8, result: UInt8)
+    case deviceFailure(command: UInt8, result: UInt8, status: UInt8)
     case invalidResponseSize(Int)
     case invalidDataSize(UInt32)
     case invalidKeyCount
     case invalidFanCount
     case invalidFanSpeed(String)
+}
+
+enum SMCResponseValidation {
+    static func check(command: UInt8, result: UInt8, status: UInt8) throws {
+        // AppleSMC's private status field has no reliable public definition.
+        // Conservatively fail closed unless both fields are zero, retaining
+        // both raw values for compatibility diagnostics.
+        guard result == 0, status == 0 else {
+            throw SMCError.deviceFailure(command: command, result: result, status: status)
+        }
+    }
 }
 
 enum SMCDecoder {

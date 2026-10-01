@@ -97,6 +97,20 @@ final class SMCDecoderTests: XCTestCase {
         XCTAssertThrowsError(try SMCFourCC.encode("Tp001"))
         XCTAssertThrowsError(try SMCFourCC.encode("温度"))
     }
+
+    func testResponseValidationAcceptsOnlyZeroResultAndStatus() throws {
+        try SMCResponseValidation.check(command: 5, result: 0, status: 0)
+        for (result, status): (UInt8, UInt8) in [(1, 0), (0, 2), (3, 4)] {
+            XCTAssertThrowsError(try SMCResponseValidation.check(command: 5, result: result, status: status)) { error in
+                guard case let SMCError.deviceFailure(command, actualResult, actualStatus) = error else {
+                    return XCTFail("Expected raw AppleSMC result and status, got \(error)")
+                }
+                XCTAssertEqual(command, 5)
+                XCTAssertEqual(actualResult, result)
+                XCTAssertEqual(actualStatus, status)
+            }
+        }
+    }
 }
 
 private struct FakeSMC: SMCTransport {
