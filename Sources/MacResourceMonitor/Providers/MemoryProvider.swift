@@ -16,6 +16,7 @@ enum MemoryCalculator {
 struct MemoryProvider: MemoryProviding {
     func sample() throws -> MemoryMetric {
         let host = mach_host_self()
+        defer { mach_port_deallocate(mach_task_self_, host) }
         var pageSize: vm_size_t = 0
         let pageResult = host_page_size(host, &pageSize)
         guard pageResult == KERN_SUCCESS else {

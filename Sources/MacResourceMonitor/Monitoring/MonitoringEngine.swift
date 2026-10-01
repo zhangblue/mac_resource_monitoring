@@ -30,6 +30,8 @@ struct MonitoringUpdate: Sendable {
 actor MonitoringEngine {
     private let providers: ProviderSet
     private let logger: any DiagnosticLogging
+    private let sleepMonitor: SystemSleepMonitor
+    private var baselineSleepGeneration: UUID?
     private var previousCPU: CPUTicks?
     private var networkCalculator = NetworkRateCalculator()
     private var loop: Task<Void, Never>?
@@ -41,9 +43,11 @@ actor MonitoringEngine {
     private(set) var history: MetricHistory
 
     init(providers: ProviderSet = .live, historyCapacity: Int = 300,
-         logger: any DiagnosticLogging = DiagnosticLogger.live) {
+         logger: any DiagnosticLogging = DiagnosticLogger.live,
+         sleepMonitor: SystemSleepMonitor = SystemSleepMonitor()) {
         self.providers = providers
         self.logger = logger
+        self.sleepMonitor = sleepMonitor
         history = MetricHistory(capacity: historyCapacity)
     }
 
@@ -108,8 +112,11 @@ actor MonitoringEngine {
         let task = Task { [weak self] in
             _ = await predecessor?.value
             guard !Task.isCancelled, await self?.isCurrent(token) == true else { return cancelled }
+            guard let sleepState = self?.sleepMonitor.snapshot(), !sleepState.isSleeping else {
+                return cancelled
+            }
             let readings = await Self.collect(providers)
-            return await self?.commit(readings, at: date, generation: token) ?? cancelled
+            return await self?.commit(readings, at: date, generation: token, sleepState: sleepState) ?? cancelled
         }
         sampling = task
         samplingID = id
@@ -161,9 +168,17 @@ actor MonitoringEngine {
     }
 
     private func commit(_ readings: ProviderReadings, at date: Date,
-                        generation token: UUID) -> MonitoringUpdate {
-        guard generation == token, !Task.isCancelled else {
+                        generation token: UUID, sleepState: SystemSleepMonitor.State) -> MonitoringUpdate {
+        guard generation == token, !Task.isCancelled, sleepState == sleepMonitor.snapshot() else {
             return MonitoringUpdate(snapshot: Self.cancelledSnapshot(at: date), history: history)
+        }
+
+        // Discard in-flight reads crossing a power boundary above, then rebuild
+        // both delta baselines from the first complete post-wake collection.
+        if baselineSleepGeneration != sleepState.generation {
+            previousCPU = nil
+            networkCalculator = NetworkRateCalculator()
+            baselineSleepGeneration = sleepState.generation
         }
 
         let snapshot = MetricSnapshot(timestamp: date, cpuUsage: cpuUsage(readings.0),

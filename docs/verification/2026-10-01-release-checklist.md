@@ -10,7 +10,7 @@
 
 ## 结论摘要
 
-- **已验证**：arm64 Release 构建、应用包结构、ad-hoc 签名、DMG 完整性及只读挂载内容、应用启动冒烟检查、严格并发同源监控 harness、磁盘容量同源 harness、根卷容量读取和磁盘 capacity-only 展示逻辑。
+- **已验证**：arm64 Release 构建、应用包结构、ad-hoc 签名、DMG 完整性及只读挂载内容、应用启动冒烟检查、严格并发同源监控及采样边界 harness、磁盘容量同源 harness、根卷容量读取和磁盘 capacity-only 展示逻辑。采样边界验证包含真实 Mach 端口引用计数，以及模拟工作区睡眠/唤醒通知。
 - **受环境限制**：当前仅安装 Command Line Tools，测试目标缺少 `XCTest` 模块；`swift test` 已实际执行但无法编译测试目标，因此不能记为通过。
 - **未验证**：真实拖入 `/Applications` 的完整安装/卸载流程、首次右键打开及 Gatekeeper 提示、登录项开关、界面视觉与 Dock 状态、高负载/下载/大文件复制、睡眠唤醒和网络接口切换。发布前应在目标 Mac 上补做这些交互场景。
 
@@ -21,6 +21,9 @@
 | XCTest 测试套件 | **受环境限制** | `swift test --disable-sandbox` 退出 1；`Tests/MacResourceMonitorTests/DomainTests.swift:1:8` 报 `no such module 'XCTest'`。没有将此项记为通过。 |
 | 监控引擎同源 harness | **已验证** | 以 `-strict-concurrency=complete -warnings-as-errors` 编译并运行，输出 `PASS: monitoring lifecycle and diagnostic logging scenarios`。覆盖采样生命周期、失败隔离、历史与诊断日志场景。 |
 | 磁盘容量同源 harness | **已验证** | 以严格并发模式编译并运行，输出 `PASS: disk capacity conversion, live root volume, presentation, progress bounds and menu bar`。包含真实根卷容量读取、数值边界、容量进度和菜单栏四项文本。 |
+| 采样边界同源 harness | **已验证** | `SamplingBoundaryTests.swift` 以 `-DSAMPLING_BOUNDARY_HARNESS -strict-concurrency=complete -warnings-as-errors` 编译并运行，输出 `PASS: sampling boundary checks`。CPU、内存各 100 次真实采样前后 host send-right 引用数均为 `1 -> 1`；修复前分别增长 100。 |
+| 睡眠通知和并发边界 | **已验证（模拟通知）** | 同源 harness 发送 `NSWorkspace` 睡眠/唤醒通知：2 秒短睡眠后首次网络采样为 `—`、第二次恢复 100 B/s 下载和 20 B/s 上传；跨睡眠在途读取被丢弃，睡中采样不进入历史，单独唤醒通知也重置基线，engine 释放后观察者对象释放。未令测试机实际睡眠。 |
+| 折线采样空档 | **已验证（逻辑）** | 120 秒空档分成两段；1.8 秒抖动和恰好 3 秒间隔保持连续；3.001 秒、重复/倒退时间戳和不可用点断线。修复前 120 秒空档检查失败。 |
 | arm64 Release 构建 | **已验证** | `swift build -c release --arch arm64 --disable-sandbox` 退出 0，输出 `Build complete!`。 |
 | 应用包构建 | **已验证** | `bash scripts/build-app.sh` 退出 0；可执行文件为 thin arm64 Mach-O。 |
 | 应用元数据 | **已验证** | 发布验证脚本核对 bundle ID `com.local.MacResourceMonitor`、版本 `1.0 (1)`、最低系统 `13.0`、`LSUIElement=true` 和可执行文件名。 |
@@ -42,7 +45,7 @@
 | 空闲、高 CPU 场景趋势方向 | **未验证** | 未制造高负载，避免影响用户当前工作。 |
 | 网络下载、接口切换及速率恢复 | **未验证** | 未发起下载，也未切换网络接口。 |
 | 大文件复制 | **未验证** | 用户已取消磁盘读写速率功能；磁盘只验收容量，因此无需以复制场景验证读写速率。 |
-| 睡眠/唤醒后第二次采样恢复速率 | **未验证** | 未控制测试机睡眠/唤醒。 |
+| 睡眠/唤醒后第二次采样恢复速率 | **已验证（模拟通知）/未验证（真机睡眠）** | 同源 harness 验证通知驱动的基线重置、在途采样隔离及第二次速率恢复；未控制测试机真实睡眠/唤醒或人工查看界面。 |
 | 无 Dock 图标 | **已验证（配置）/未验证（视觉）** | `Info.plist` 的 `LSUIElement=true` 已验证；尚未人工观察 Dock。 |
 | “登录时自动启动”开启、关闭和重启 | **未验证** | 未修改用户登录项。设置名称已与 `INSTALL.md` 核对一致。 |
 
@@ -59,8 +62,8 @@
 ## 交付物
 
 - DMG：`/Users/zhangdi/works/workspace/github/mac_resource_monitoring/.worktrees/mac-resource-monitor/dist/MacResourceMonitor.dmg`
-- 大小：404 KiB（本次构建）
-- SHA-256：`f6e4f24167c2904916205bfe3f0e782f0f5140708956a5b1563801317c89f76d`
+- 大小：423230 bytes（约 413.3 KiB，本次修复后构建）
+- SHA-256：`353004f25347d1a8d8a013c173ee43e74f826531e51359484cfa7c6504214d6c`
 - 签名：ad-hoc
 - 公证：未公证
 

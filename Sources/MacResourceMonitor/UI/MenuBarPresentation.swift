@@ -62,6 +62,15 @@ struct SparklinePresentation {
         var current: [HistoryPoint] = []
         let cutoff = points.last?.timestamp.addingTimeInterval(-300) ?? .distantPast
         for point in points where point.timestamp >= cutoff {
+            // One-second sampling may jitter; a gap above three seconds is a
+            // discontinuity, as is a duplicate/backward wall-clock timestamp.
+            if let previous = current.last {
+                let interval = point.timestamp.timeIntervalSince(previous.timestamp)
+                if interval <= 0 || interval > 3 {
+                    segments.append(current)
+                    current = []
+                }
+            }
             if let value = point.value, value.isFinite {
                 current.append(point)
             } else if !current.isEmpty {
