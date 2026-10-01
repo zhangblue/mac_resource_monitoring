@@ -19,6 +19,11 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(MetricFormatter.menuRate(8_400_000), "8.4M")
     }
 
+    func testRateFormatterSaturatesExtremelyLargeFiniteValues() {
+        XCTAssertEqual(MetricFormatter.rate(Double.greatestFiniteMagnitude), "9223372036854775807 GB/s")
+        XCTAssertEqual(MetricFormatter.menuRate(Double.greatestFiniteMagnitude), "9223372036854775807G")
+    }
+
     func testRateFormatterUsesDecimalKBMBAndGBUnits() {
         XCTAssertEqual(MetricFormatter.rate(1_250), "1.3 KB/s")
         XCTAssertEqual(MetricFormatter.rate(1_250_000), "1.3 MB/s")

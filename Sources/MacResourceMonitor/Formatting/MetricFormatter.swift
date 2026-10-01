@@ -37,6 +37,7 @@ enum MetricFormatter {
     }
 
     private static func compact(_ value: Double) -> String {
+        guard value <= Double.greatestFiniteMagnitude / 10 else { return integer(value) }
         let rounded = (value * 10).rounded() / 10
         return rounded.rounded(.towardZero) == rounded ? integer(rounded) : String(format: "%.1f", rounded)
     }
