@@ -4,8 +4,24 @@ struct MetricCardView: View {
     let title: String
     let value: String
     let detail: String
-    var points: [HistoryPoint]? = nil
-    var fixedRange: ClosedRange<Double>? = nil
+    let points: [HistoryPoint]?
+    let sparklineStyle: SparklineStyle?
+
+    init(title: String, value: String, detail: String) {
+        self.title = title
+        self.value = value
+        self.detail = detail
+        self.points = nil
+        self.sparklineStyle = nil
+    }
+
+    init(title: String, value: String, detail: String, points: [HistoryPoint], sparklineStyle: SparklineStyle) {
+        self.title = title
+        self.value = value
+        self.detail = detail
+        self.points = points
+        self.sparklineStyle = sparklineStyle
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -18,8 +34,8 @@ struct MetricCardView: View {
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            if let points {
-                SparklineView(points: points, fixedRange: fixedRange,
+            if let points, let sparklineStyle {
+                SparklineView(points: points, style: sparklineStyle,
                               emptyMessage: detail == "暂不可用" ? "暂不可用" : "等待下一次采样")
             }
             Text(detail)

@@ -2,6 +2,13 @@ import XCTest
 @testable import MacResourceMonitor
 
 final class SparklineAxisPresentationTests: XCTestCase {
+    func testMetricStylesUseExpectedAxisKinds() {
+        XCTAssertEqual(SparklineStyle.cpu.axisKind, .percentage)
+        XCTAssertEqual(SparklineStyle.memory.axisKind, .percentage)
+        XCTAssertEqual(SparklineStyle.upload.axisKind, .rate)
+        XCTAssertEqual(SparklineStyle.download.axisKind, .rate)
+    }
+
     func testLowCPUUsageUsesNarrowDynamicRange() throws {
         let axis = try XCTUnwrap(SparklineAxisPresentation(values: [0.02, 0.03, 0.05], kind: .percentage))
         XCTAssertLessThanOrEqual(axis.domain.lowerBound, 0.02)

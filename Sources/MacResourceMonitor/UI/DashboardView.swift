@@ -30,16 +30,16 @@ struct DashboardView: View {
             LazyVGrid(columns: columns, spacing: 12) {
                 MetricCardView(title: "CPU", value: percent(store.snapshot?.cpuUsage),
                                detail: MetricPresentation.status(for: store.snapshot?.cpuUsage),
-                               points: store.history.cpu.elements, fixedRange: 0...1)
+                               points: store.history.cpu.elements, sparklineStyle: .cpu)
                 MetricCardView(title: "内存", value: percent(store.snapshot?.memory.map(\.usage)),
                                detail: memoryDetail,
-                               points: store.history.memory.elements, fixedRange: 0...1)
+                               points: store.history.memory.elements, sparklineStyle: .memory)
                 MetricCardView(title: "上传", value: rate(store.snapshot?.network.value?.uploadBytesPerSecond),
                                detail: networkStatus(store.snapshot?.network.value?.uploadBytesPerSecond),
-                               points: store.history.upload.elements)
+                               points: store.history.upload.elements, sparklineStyle: .upload)
                 MetricCardView(title: "下载", value: rate(store.snapshot?.network.value?.downloadBytesPerSecond),
                                detail: networkStatus(store.snapshot?.network.value?.downloadBytesPerSecond),
-                               points: store.history.download.elements)
+                               points: store.history.download.elements, sparklineStyle: .download)
                 MetricCardView(title: "芯片温度", value: temperature,
                                detail: MetricPresentation.temperatureStatus(for: store.snapshot?.thermal))
                 MetricCardView(title: "风扇", value: fan,
