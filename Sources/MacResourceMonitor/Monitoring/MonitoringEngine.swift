@@ -29,16 +29,15 @@ struct MonitoringUpdate: Sendable {
 
 actor MonitoringEngine {
     private let providers: ProviderSet
-    // The initial CPU reading is the cumulative busy proportion since boot.
-    // Subsequent readings use the interval between successful samples.
-    private var previousCPU: CPUTicks? = .init(user: 0, system: 0, nice: 0, idle: 0)
+    private var previousCPU: CPUTicks?
     private var networkCalculator = NetworkRateCalculator()
     private var diskCalculator = DiskRateCalculator()
     private var diskDriverID: UInt64?
     private var diskBSDName: String?
     private var loop: Task<Void, Never>?
     private var generation = UUID()
-    private var sampling: Task<MetricSnapshot, Never>?
+    private var sampling: Task<MonitoringUpdate, Never>?
+    private var samplingID: UUID?
     private var subscribers: [UUID: AsyncStream<MonitoringUpdate>.Continuation] = [:]
     private(set) var history: MetricHistory
 
@@ -47,7 +46,11 @@ actor MonitoringEngine {
         history = MetricHistory(capacity: historyCapacity)
     }
 
-    deinit { loop?.cancel() }
+    deinit {
+        loop?.cancel()
+        sampling?.cancel()
+        for continuation in subscribers.values { continuation.finish() }
+    }
 
     func updates() -> AsyncStream<MonitoringUpdate> {
         let id = UUID()
@@ -61,8 +64,7 @@ actor MonitoringEngine {
 
     func start() {
         guard loop == nil else { return }
-        let token = UUID()
-        generation = token
+        let token = generation
         loop = Task { [weak self] in
             let clock = ContinuousClock()
             while !Task.isCancelled {
@@ -80,27 +82,60 @@ actor MonitoringEngine {
         generation = UUID()
         loop?.cancel()
         loop = nil
+        sampling?.cancel()
+        sampling = nil
+        samplingID = nil
+        previousCPU = nil
+        networkCalculator = NetworkRateCalculator()
+        diskCalculator = DiskRateCalculator()
+        diskDriverID = nil
+        diskBSDName = nil
         let continuations = Array(subscribers.values)
         subscribers.removeAll()
         continuations.forEach { $0.finish() }
     }
 
-    // Coalesce overlapping requests so actor reentrancy cannot reorder baselines.
     func sample(at date: Date = Date()) async -> MetricSnapshot {
-        if let sampling { return await sampling.value }
-        let task = Task { await collect(at: date) }
+        await sampledUpdate(at: date).snapshot
+    }
+
+    // Each request owns a task and waits for its predecessor in this generation.
+    // Stop detaches the old queue; late reads can finish but cannot commit state.
+    private func sampledUpdate(at date: Date) async -> MonitoringUpdate {
+        let predecessor = sampling
+        let token = generation
+        let id = UUID()
+        let providers = providers
+        let cancelled = MonitoringUpdate(snapshot: Self.cancelledSnapshot(at: date), history: history)
+        let task = Task { [weak self] in
+            _ = await predecessor?.value
+            guard !Task.isCancelled, await self?.isCurrent(token) == true else { return cancelled }
+            let readings = await Self.collect(providers)
+            return await self?.commit(readings, at: date, generation: token) ?? cancelled
+        }
         sampling = task
-        let snapshot = await task.value
-        sampling = nil
-        return snapshot
+        samplingID = id
+        let update = await task.value
+        if samplingID == id {
+            sampling = nil
+            samplingID = nil
+        }
+        return update
     }
 
     private func sampleAndPublish(generation token: UUID) async {
         guard generation == token, !Task.isCancelled else { return }
-        let snapshot = await sample()
+        let update = await sampledUpdate(at: Date())
         guard generation == token, !Task.isCancelled else { return }
-        let update = MonitoringUpdate(snapshot: snapshot, history: history)
         for continuation in subscribers.values { continuation.yield(update) }
+    }
+
+    private func isCurrent(_ token: UUID) -> Bool { generation == token }
+
+    private static func cancelledSnapshot(at date: Date) -> MetricSnapshot {
+        MetricSnapshot(timestamp: date, cpuUsage: .unavailable("采样已取消"),
+                       memory: .unavailable("采样已取消"), network: .unavailable("采样已取消"),
+                       thermal: .unavailable("采样已取消"), disk: .unavailable("采样已取消"))
     }
 
     private func removeSubscriber(_ id: UUID) {
@@ -115,20 +150,28 @@ actor MonitoringEngine {
         catch { return .unavailable(String(describing: error)) }
     }
 
-    private func collect(at date: Date) async -> MetricSnapshot {
-        let providers = providers
+    private typealias ProviderReadings = (Reading<CPUTicks>, Reading<MemoryMetric>, Reading<NetworkCounters>,
+                                         Reading<DiskCounters>, Reading<ThermalMetric>)
+
+    private static func collect(_ providers: ProviderSet) async -> ProviderReadings {
         async let cpu = Self.read { try await providers.cpu.sample() }
         async let memory = Self.read { try await providers.memory.sample() }
         async let network = Self.read { try await providers.network.sample() }
         async let disk = Self.read { try await providers.disk.sample() }
         async let thermal = Self.read { try await providers.sensors.sample() }
-        let readings = await (cpu, memory, network, disk, thermal)
+        return await (cpu, memory, network, disk, thermal)
+    }
+
+    private func commit(_ readings: ProviderReadings, at date: Date, generation token: UUID) -> MonitoringUpdate {
+        guard generation == token, !Task.isCancelled else {
+            return MonitoringUpdate(snapshot: Self.cancelledSnapshot(at: date), history: history)
+        }
 
         let snapshot = MetricSnapshot(timestamp: date, cpuUsage: cpuUsage(readings.0),
                                       memory: readings.1, network: networkMetric(readings.2, at: date),
                                       thermal: readings.4, disk: diskMetric(readings.3, at: date))
         history.append(snapshot)
-        return snapshot
+        return MonitoringUpdate(snapshot: snapshot, history: history)
     }
 
     private func cpuUsage(_ reading: Reading<CPUTicks>) -> Reading<Double> {

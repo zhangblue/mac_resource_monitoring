@@ -4,6 +4,10 @@ import XCTest
 @testable import MacResourceMonitor
 
 final class MonitoringEngineTests: XCTestCase {
+    func testFirstCPUIsUnavailableThenUsesRealDelta() async throws { try await MonitoringChecks.cpuBaseline() }
+    func testPendingStopRestartRejectsOldResult() async throws { try await MonitoringChecks.pendingRestart() }
+    func testConcurrentExplicitSamplesKeepOwnTimestamps() async throws { try await MonitoringChecks.concurrentSamples() }
+    func testDeinitFinishesLiveStream() async throws { try await MonitoringChecks.streamLifetime() }
     func testOneProviderFailureDoesNotDropOtherMetrics() async throws {
         try await MonitoringChecks.failureIsolation()
     }
@@ -31,14 +35,34 @@ final class MonitoringEngineTests: XCTestCase {
 #else
 @main
 enum MonitoringHarness {
-    static func main() async throws {
+    static func main() async {
+        do { try await run() }
+        catch { print("FAIL: \(error)"); exit(1) }
+    }
+
+    static func run() async throws {
+        if let check = CommandLine.arguments.dropFirst().first {
+            switch check {
+            case "cpu": try await MonitoringChecks.cpuBaseline()
+            case "restart": try await MonitoringChecks.pendingRestart()
+            case "concurrent": try await MonitoringChecks.concurrentSamples()
+            case "deinit": try await MonitoringChecks.streamLifetime()
+            default: throw MonitoringTestError.failed
+            }
+            print("PASS: \(check)")
+            return
+        }
+        try await MonitoringChecks.cpuBaseline()
+        try await MonitoringChecks.pendingRestart()
+        try await MonitoringChecks.concurrentSamples()
+        try await MonitoringChecks.streamLifetime()
         try await MonitoringChecks.failureIsolation()
         try await MonitoringChecks.historyCapacity()
         try await MonitoringChecks.diskDriverChange()
         try await MonitoringChecks.lifecycle()
         try await MonitoringChecks.stopDuringSample()
         try await MonitoringChecks.storeLifetime()
-        print("PASS: failure isolation, thermal semantics, 301→300 history/gaps, disk identity, one-second single loop, cancellation, restart and Store lifetime")
+        print("PASS: real CPU baseline, pending restart isolation, distinct concurrent samples, stream deinit, provider isolation, 301→300 history, disk identity, cadence, cancellation and Store lifetime")
     }
 }
 #endif
@@ -52,6 +76,19 @@ private func require(_ condition: Bool, _ message: String) throws {
 private struct FakeCPUProvider: CPUProviding {
     var result: Result<CPUTicks, MonitoringTestError> = .success(.init(user: 10, system: 10, nice: 0, idle: 80))
     func sample() throws -> CPUTicks { try result.get() }
+}
+
+private actor AdvancingCPUProvider: CPUProviding {
+    private var count: UInt64 = 0
+    func sample() -> CPUTicks {
+        count += 1
+        return .init(user: 10 + count * 30, system: 10, nice: 0, idle: 80 + count * 70)
+    }
+}
+
+private actor CompletionFlag {
+    private(set) var completed = false
+    func finish() { completed = true }
 }
 
 private struct FakeMemoryProvider: MemoryProviding {
@@ -97,8 +134,10 @@ private actor GatedMemoryProvider: MemoryProviding {
     private var continuation: CheckedContinuation<Void, Never>?
     private var entered = false
     func sample() async -> MemoryMetric {
-        entered = true
-        await withCheckedContinuation { continuation = $0 }
+        if !entered {
+            entered = true
+            await withCheckedContinuation { continuation = $0 }
+        }
         return .init(usage: 0.5, usedBytes: 500, totalBytes: 1_000)
     }
     func isSampling() -> Bool { entered }
@@ -107,16 +146,18 @@ private actor GatedMemoryProvider: MemoryProviding {
 
 private enum MonitoringChecks {
     static func providers(memory: any MemoryProviding = FakeMemoryProvider(),
-                          sensors: any SensorProviding = FakeSensorProvider()) -> ProviderSet {
-        ProviderSet(cpu: FakeCPUProvider(), memory: memory, network: FakeNetworkProvider(),
+                          sensors: any SensorProviding = FakeSensorProvider(),
+                          cpu: any CPUProviding = FakeCPUProvider()) -> ProviderSet {
+        ProviderSet(cpu: cpu, memory: memory, network: FakeNetworkProvider(),
                     disk: FakeDiskProvider(), sensors: sensors)
     }
 
     // Fails if a thrown memory read cancels other providers, or nil temperature becomes unavailable.
     static func failureIsolation() async throws {
-        let engine = MonitoringEngine(providers: providers())
+        let engine = MonitoringEngine(providers: providers(cpu: AdvancingCPUProvider()))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 0))
         let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
-        try require(snapshot.cpuUsage.value == 0.2, "CPU survives memory failure")
+        try require(snapshot.cpuUsage.value == 0.3, "CPU survives memory failure")
         try require(snapshot.memory.isUnavailable, "Memory error is unavailable")
         try require(snapshot.disk.value?.usedBytes == 500, "Disk capacity survives memory failure")
         try require(snapshot.thermal.value?.fan == .fanless, "Fanless state survives nil temperature")
@@ -207,6 +248,78 @@ private enum MonitoringChecks {
         var iterator = stream.makeAsyncIterator()
         let update = await iterator.next()
         try require(update == nil, "Cancelled in-flight sample is never published")
+    }
+
+    static func cpuBaseline() async throws {
+        let engine = MonitoringEngine(providers: providers(cpu: AdvancingCPUProvider()))
+        let first = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        let second = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        let history = await engine.history
+        try require(first.cpuUsage.isUnavailable && history.cpu.elements[0].value == nil,
+                    "First CPU sample and history must be unavailable")
+        try require(second.cpuUsage.value == 0.3 && history.cpu.elements[1].value == 0.3,
+                    "Second CPU uses 30 busy ticks out of 100 real delta ticks")
+    }
+
+    static func pendingRestart() async throws {
+        let memory = GatedMemoryProvider()
+        let engine = MonitoringEngine(providers: providers(memory: memory, cpu: AdvancingCPUProvider()))
+        await engine.start()
+        while !(await memory.isSampling()) { await Task.yield() }
+        await engine.stop()
+        let restartDate = Date()
+        let stream = await engine.updates()
+        await engine.start()
+        try await Task.sleep(for: .milliseconds(100))
+        let historyBeforeRelease = await engine.history
+        await memory.release()
+        var iterator = stream.makeAsyncIterator()
+        let update = await iterator.next()
+        try await Task.sleep(for: .milliseconds(100))
+        let historyAfterRelease = await engine.history
+        await engine.stop()
+        try require(historyBeforeRelease.cpu.count == 1, "Restart samples without awaiting the stopped task")
+        try require(update != nil && update!.snapshot.timestamp >= restartDate,
+                    "Restart must never publish a pre-stop timestamp")
+        try require(historyAfterRelease.cpu.count == 1, "Stale sample must not append history")
+        try require(update!.snapshot.cpuUsage.isUnavailable, "Stale sample must not seed the new CPU baseline")
+    }
+
+    static func concurrentSamples() async throws {
+        let memory = GatedMemoryProvider()
+        let engine = MonitoringEngine(providers: providers(memory: memory, cpu: AdvancingCPUProvider()))
+        let first = Task { await engine.sample(at: Date(timeIntervalSince1970: 1)) }
+        while !(await memory.isSampling()) { await Task.yield() }
+        let second = Task { await engine.sample(at: Date(timeIntervalSince1970: 2)) }
+        try await Task.sleep(for: .milliseconds(100))
+        await memory.release()
+        let samples = await (first.value, second.value)
+        let history = await engine.history
+        try require(samples.0.timestamp == Date(timeIntervalSince1970: 1), "First sample retains its timestamp")
+        try require(samples.1.timestamp == Date(timeIntervalSince1970: 2), "Second sample retains its own timestamp")
+        try require(history.cpu.elements.map(\.timestamp) == [samples.0.timestamp, samples.1.timestamp],
+                    "Concurrent requests serialize into two chronological history points")
+        try require(samples.1.cpuUsage.value == 0.3, "Second request performs its own physical sample")
+    }
+
+    static func streamLifetime() async throws {
+        var engine: MonitoringEngine? = MonitoringEngine(providers: providers())
+        weak var weakEngine = engine
+        let stream = await engine!.updates()
+        engine = nil
+        try require(weakEngine == nil, "Live continuation must not retain engine")
+        let flag = CompletionFlag()
+        let waiting = Task {
+            var iterator = stream.makeAsyncIterator()
+            let update = await iterator.next()
+            await flag.finish()
+            return update
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        let finishedWithoutCancellation = await flag.completed
+        waiting.cancel()
+        let result = await waiting.value
+        try require(finishedWithoutCancellation && result == nil, "Engine deinit must finish a surviving stream")
     }
 
     // Fails if the consumption task retains the Store or survives cancellation.
