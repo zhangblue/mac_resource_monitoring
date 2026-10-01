@@ -4,17 +4,37 @@ import Foundation
 @main
 enum DiskCapacityHarness {
     static func main() throws {
+        let floatingNext = (1e18 as Double).nextUp
+        try check(DiskCapacity.exactUInt64(NSNumber(value: 9_223_372_036_854_775_808.0))
+                  == 9_223_372_036_854_775_808, "Large Double integer keeps its exact value")
+        try check(DiskCapacity.exactUInt64(NSNumber(value: floatingNext))
+                  == 1_000_000_000_000_000_128, "Double nextUp keeps its 128-byte increment")
+        try check(DiskCapacity.exactUInt64(NSNumber(value: Double(UInt64.max))) == nil,
+                  "Double-rounded UInt64 maximum is outside the valid range")
+        try check(DiskCapacity.exactUInt64(NSNumber(value: false)) == nil
+                  && DiskCapacity.exactUInt64(NSNumber(value: true)) == nil,
+                  "Boolean attributes are not capacities")
+        do {
+            _ = try DiskCapacity.from([
+                .systemSize: NSNumber(value: 1e18 as Double),
+                .systemFreeSize: NSNumber(value: floatingNext)
+            ])
+            throw HarnessError.failed("Floating free space above total was accepted")
+        } catch DiskProviderError.capacityUnavailable {}
         for (number, expected) in [
             (NSNumber(value: 0), UInt64(0)),
             (NSNumber(value: UInt64(1_000)), UInt64(1_000)),
+            (NSNumber(value: Float(128)), UInt64(128)),
             (NSNumber(value: 100.0), UInt64(100)),
-            (NSNumber(value: UInt64.max), UInt64.max)
+            (NSNumber(value: UInt64.max), UInt64.max),
+            (NSDecimalNumber(string: "18446744073709551615"), UInt64.max)
         ] {
             try check(DiskCapacity.exactUInt64(number) == expected,
                       "Valid unsigned integer converts without loss: \(number)")
         }
         for number in [
             NSNumber(value: -1), NSNumber(value: -0.5), NSNumber(value: 100.5),
+            NSNumber(value: Float(100.5)), NSDecimalNumber(string: "100.5"),
             NSNumber(value: Double.nan), NSNumber(value: Double.infinity),
             NSNumber(value: -Double.infinity),
             NSDecimalNumber(string: "18446744073709551616")

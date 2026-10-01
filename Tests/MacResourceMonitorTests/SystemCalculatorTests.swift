@@ -124,19 +124,44 @@ final class SystemCalculatorTests: XCTestCase {
         for (number, expected) in [
             (NSNumber(value: 0), UInt64(0)),
             (NSNumber(value: UInt64(1_000)), UInt64(1_000)),
+            (NSNumber(value: Float(128)), UInt64(128)),
             (NSNumber(value: 100.0), UInt64(100)),
-            (NSNumber(value: UInt64.max), UInt64.max)
+            (NSNumber(value: UInt64.max), UInt64.max),
+            (NSDecimalNumber(string: "18446744073709551615"), UInt64.max)
         ] {
             XCTAssertEqual(DiskCapacity.exactUInt64(number), expected)
         }
         for number in [
             NSNumber(value: -1), NSNumber(value: -0.5), NSNumber(value: 100.5),
+            NSNumber(value: Float(100.5)), NSDecimalNumber(string: "100.5"),
             NSNumber(value: Double.nan), NSNumber(value: Double.infinity),
             NSNumber(value: -Double.infinity),
             NSDecimalNumber(string: "18446744073709551616")
         ] {
             XCTAssertNil(DiskCapacity.exactUInt64(number), "Rejected \(number)")
         }
+    }
+
+    func testDiskCapacityPreservesActualFloatingPointInteger() {
+        let next = (1e18 as Double).nextUp
+        XCTAssertEqual(DiskCapacity.exactUInt64(NSNumber(value: 9_223_372_036_854_775_808.0)),
+                       9_223_372_036_854_775_808)
+        XCTAssertEqual(DiskCapacity.exactUInt64(NSNumber(value: next)),
+                       1_000_000_000_000_000_128)
+        XCTAssertNil(DiskCapacity.exactUInt64(NSNumber(value: Double(UInt64.max))))
+    }
+
+    func testDiskCapacityRejectsFloatingFreeSpaceAboveTotal() {
+        let next = (1e18 as Double).nextUp
+        XCTAssertThrowsError(try DiskCapacity.from([
+            .systemSize: NSNumber(value: 1e18 as Double),
+            .systemFreeSize: NSNumber(value: next)
+        ]))
+    }
+
+    func testDiskCapacityRejectsBooleanAttribute() {
+        XCTAssertNil(DiskCapacity.exactUInt64(NSNumber(value: false)))
+        XCTAssertNil(DiskCapacity.exactUInt64(NSNumber(value: true)))
     }
 
     func testDiskCapacityAcceptsUInt64MaximumFromFilesystemAttributes() throws {
