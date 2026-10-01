@@ -10,15 +10,15 @@
 
 ## 结论摘要
 
-- **已验证**：arm64 Release 构建、应用包结构、ad-hoc 签名、DMG 完整性及只读挂载内容、应用启动冒烟检查、严格并发同源监控及采样边界 harness、磁盘容量同源 harness、根卷容量读取和磁盘 capacity-only 展示逻辑。采样边界验证包含真实 Mach 端口引用计数，以及模拟工作区睡眠/唤醒通知。
-- **受环境限制**：当前仅安装 Command Line Tools，测试目标缺少 `XCTest` 模块；`swift test` 已实际执行但无法编译测试目标，因此不能记为通过。
+- **已验证**：完整 XCTest 测试套件、arm64 Release 构建、应用包结构、ad-hoc 签名、DMG 完整性及只读挂载内容、应用启动冒烟检查、严格并发同源监控及采样边界 harness、磁盘容量同源 harness、根卷容量读取和磁盘 capacity-only 展示逻辑。采样边界验证包含真实 Mach 端口引用计数，以及模拟工作区睡眠/唤醒通知。
+- **测试工具链**：Xcode 26.3（Build 17C529）、Apple Swift 6.2.4；`swift test` 共执行 82 项 XCTest，0 失败。
 - **未验证**：真实拖入 `/Applications` 的完整安装/卸载流程、首次右键打开及 Gatekeeper 提示、登录项开关、界面视觉与 Dock 状态、高负载/下载/大文件复制、睡眠唤醒和网络接口切换。发布前应在目标 Mac 上补做这些交互场景。
 
 ## 自动化与构建验证
 
 | 项目 | 状态 | 证据 |
 | --- | --- | --- |
-| XCTest 测试套件 | **受环境限制** | `swift test --disable-sandbox` 退出 1；`Tests/MacResourceMonitorTests/DomainTests.swift:1:8` 报 `no such module 'XCTest'`。没有将此项记为通过。 |
+| XCTest 测试套件 | **已验证** | 安装并启用完整 Xcode 后，`swift test --disable-sandbox` 退出 0；共执行 82 项测试，0 失败、0 unexpected，耗时约 5.19 秒。测试代码存在 4 条 `weak` 变量可改为常量的编译器提示，不影响测试结果。 |
 | 监控引擎同源 harness | **已验证** | 以 `-strict-concurrency=complete -warnings-as-errors` 编译并运行，输出 `PASS: monitoring lifecycle and diagnostic logging scenarios`。覆盖采样生命周期、失败隔离、历史与诊断日志场景。 |
 | 磁盘容量同源 harness | **已验证** | 以严格并发模式编译并运行，输出 `PASS: disk capacity conversion, live root volume, presentation, progress bounds and menu bar`。包含真实根卷容量读取、数值边界、容量进度和菜单栏四项文本。 |
 | 采样边界同源 harness | **已验证** | `SamplingBoundaryTests.swift` 以 `-DSAMPLING_BOUNDARY_HARNESS -strict-concurrency=complete -warnings-as-errors` 编译并运行，输出 `PASS: sampling boundary checks`。CPU、内存各 100 次真实采样前后 host send-right 引用数均为 `1 -> 1`；修复前分别增长 100。 |
@@ -62,8 +62,8 @@
 ## 交付物
 
 - DMG：`/Users/zhangdi/works/workspace/github/mac_resource_monitoring/.worktrees/mac-resource-monitor/dist/MacResourceMonitor.dmg`
-- 大小：423230 bytes（约 413.3 KiB，本次修复后构建）
-- SHA-256：`353004f25347d1a8d8a013c173ee43e74f826531e51359484cfa7c6504214d6c`
+- 大小：426809 bytes（约 416.8 KiB，使用 Xcode 26.3 工具链重建）
+- SHA-256：`31253ae735fa5d4a8b5f3b6c9380c57a148df41740f4ebe7721a2849b99dcac4`
 - 签名：ad-hoc
 - 公证：未公证
 
