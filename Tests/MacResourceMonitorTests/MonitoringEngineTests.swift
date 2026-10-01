@@ -31,6 +31,14 @@ final class MonitoringEngineTests: XCTestCase {
     func testStoreStopsConsumptionAndDeinitializes() async throws {
         try await MonitoringChecks.storeLifetime()
     }
+
+    func testDiagnosticLogDeduplicatesAndRecovers() async throws {
+        try await MonitoringChecks.diagnosticLog()
+    }
+
+    func testDiagnosticWriteFailureDoesNotLoseSample() async throws {
+        try await MonitoringChecks.diagnosticWriteFailure()
+    }
 }
 #else
 @main
@@ -62,7 +70,9 @@ enum MonitoringHarness {
         try await MonitoringChecks.lifecycle()
         try await MonitoringChecks.stopDuringSample()
         try await MonitoringChecks.storeLifetime()
-        print("PASS: real CPU baseline, pending restart isolation, distinct concurrent samples, stream deinit, provider isolation, 301→300 history, disk identity, cadence, cancellation and Store lifetime")
+        try await MonitoringChecks.diagnosticLog()
+        try await MonitoringChecks.diagnosticWriteFailure()
+        print("PASS: monitoring lifecycle and diagnostic logging scenarios")
     }
 }
 #endif
@@ -89,6 +99,21 @@ private actor AdvancingCPUProvider: CPUProviding {
 private actor CompletionFlag {
     private(set) var completed = false
     func finish() { completed = true }
+}
+
+private actor FailingDiagnosticLogger: DiagnosticLogging {
+    private(set) var callCount = 0
+    private(set) var outcomes: [(DiagnosticComponent, Bool)] = []
+
+    func record(component: DiagnosticComponent, failure: String?, at date: Date) throws {
+        callCount += 1
+        outcomes.append((component, failure != nil))
+        throw MonitoringTestError.failed
+    }
+}
+
+private actor SilentDiagnosticLogger: DiagnosticLogging {
+    func record(component: DiagnosticComponent, failure: String?, at date: Date) {}
 }
 
 private struct FakeMemoryProvider: MemoryProviding {
@@ -145,6 +170,61 @@ private actor GatedMemoryProvider: MemoryProviding {
 }
 
 private enum MonitoringChecks {
+    static func diagnosticLog() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac-resource-monitor-diagnostics-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let logURL = directory.appendingPathComponent("diagnostics.log")
+        let logger = DiagnosticLogger(logURL: logURL)
+        let timestamp = Date(timeIntervalSince1970: 1_767_225_600)
+
+        try require(DiagnosticLogger.displayPath == "~/Library/Logs/MacResourceMonitor/diagnostics.log",
+                    "Settings and production logger share the displayed path")
+        try require(DiagnosticLogger.logURL.path.hasSuffix("/Library/Logs/MacResourceMonitor/diagnostics.log"),
+                    "Production logger uses the displayed file path")
+        try await logger.record(component: .cpu, failure: nil, at: timestamp)
+        try require(!FileManager.default.fileExists(atPath: logURL.path), "Success does not create log")
+        try await logger.record(component: .cpu, failure: "capacityUnavailable(/Users/private/data)", at: timestamp)
+        try await logger.record(component: .cpu, failure: "capacityUnavailable(/Users/private/data)", at: timestamp)
+        try await logger.record(component: .network, failure: "missingInterfaceData(192.0.2.1)", at: timestamp)
+        try await logger.record(component: .cpu, failure: nil, at: timestamp)
+        try await logger.record(component: .cpu, failure: "capacityUnavailable(/Users/private/data)", at: timestamp)
+        let lines = try String(contentsOf: logURL, encoding: .utf8).split(separator: "\n")
+        try require(lines.count == 3, "Repeated failure logs once, recovery allows another, other component logs")
+        try require(lines[0].contains("2026-01-01T00:00:00Z") && lines[0].contains("cpu capacityUnavailable"),
+                    "Line contains ISO 8601 time, component and safe category")
+        try require(lines[1].contains("network missingInterfaceData"), "Components keep separate failure state")
+        try require(!lines.joined().contains("/Users/") && !lines.joined().contains("192.0.2.1"),
+                    "Private paths and addresses never reach disk")
+        try await logger.record(component: .disk, failure: "privateDocumentName.txt", at: timestamp)
+        try await logger.record(component: .disk, failure: "privateDocumentName.txt", at: timestamp)
+        try await logger.record(component: .disk, failure: "anotherPrivateDocument.txt", at: timestamp)
+        let redacted = try String(contentsOf: logURL, encoding: .utf8)
+        try require(redacted.split(separator: "\n").count == 5,
+                    "Only identical consecutive failures are suppressed")
+        try require(redacted.contains("disk 采集失败") && !redacted.contains("privateDocumentName"),
+                    "Unknown errors use a generic category")
+        try require(!redacted.contains("anotherPrivateDocument"), "Different unknown error remains redacted")
+    }
+
+    static func diagnosticWriteFailure() async throws {
+        let logger = FailingDiagnosticLogger()
+        let engine = MonitoringEngine(providers: providers(memory: FakeMemoryProvider(fails: true)),
+                                      logger: logger)
+        let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        let history = await engine.history
+        let calls = await logger.callCount
+        let outcomes = await logger.outcomes
+        try require(snapshot.memory.isUnavailable && snapshot.disk.value?.usedBytes == 500,
+                    "Logging failure does not change readings")
+        try require(history.cpu.count == 1, "Logging failure does not discard committed history")
+        try require(calls == 5, "Every collector outcome reaches logger after commit")
+        try require(outcomes.map(\.0) == [.cpu, .memory, .network, .disk, .sensors],
+                    "Engine reports each collector under its own component")
+        try require(outcomes.map(\.1) == [false, true, false, false, false],
+                    "Raw provider failures are logged; derived CPU baseline is not")
+    }
+
     static func providers(memory: any MemoryProviding = FakeMemoryProvider(),
                           sensors: any SensorProviding = FakeSensorProvider(),
                           cpu: any CPUProviding = FakeCPUProvider()) -> ProviderSet {
@@ -152,9 +232,14 @@ private enum MonitoringChecks {
                     disk: FakeDiskProvider(), sensors: sensors)
     }
 
+    static func makeEngine(providers: ProviderSet, historyCapacity: Int = 300) -> MonitoringEngine {
+        MonitoringEngine(providers: providers, historyCapacity: historyCapacity,
+                         logger: SilentDiagnosticLogger())
+    }
+
     // Fails if a thrown memory read cancels other providers, or nil temperature becomes unavailable.
     static func failureIsolation() async throws {
-        let engine = MonitoringEngine(providers: providers(cpu: AdvancingCPUProvider()))
+        let engine = makeEngine(providers: providers(cpu: AdvancingCPUProvider()))
         _ = await engine.sample(at: Date(timeIntervalSince1970: 0))
         let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
         try require(snapshot.cpuUsage.value == 0.3, "CPU survives memory failure")
@@ -162,14 +247,14 @@ private enum MonitoringChecks {
         try require(snapshot.disk.value?.usedBytes == 500, "Disk capacity survives memory failure")
         try require(snapshot.thermal.value?.fan == .fanless, "Fanless state survives nil temperature")
         try require(snapshot.thermal.value?.chipTemperatureCelsius == nil, "Unknown temperature stays nil")
-        let failedSensors = MonitoringEngine(providers: providers(memory: FakeMemoryProvider(fails: false),
+        let failedSensors = makeEngine(providers: providers(memory: FakeMemoryProvider(fails: false),
                                                                   sensors: FakeSensorProvider(fails: true)))
         let failed = await failedSensors.sample(at: Date())
         try require(failed.thermal.isUnavailable && failed.memory.value?.usage == 0.5, "Sensor failure is isolated")
-        let stoppedFan = MonitoringEngine(providers: providers(sensors: FakeSensorProvider(fan: .rpm(0))))
+        let stoppedFan = makeEngine(providers: providers(sensors: FakeSensorProvider(fan: .rpm(0))))
         let stopped = await stoppedFan.sample(at: Date())
         try require(stopped.thermal.value?.fan == .rpm(0), "Zero RPM is distinct from fanless")
-        let failedCounters = MonitoringEngine(providers: ProviderSet(
+        let failedCounters = makeEngine(providers: ProviderSet(
             cpu: FakeCPUProvider(result: .failure(.failed)), memory: FakeMemoryProvider(fails: false),
             network: FakeNetworkProvider(fails: true), disk: FailingDiskProvider(), sensors: FakeSensorProvider()
         ))
@@ -182,7 +267,7 @@ private enum MonitoringChecks {
 
     // Fails if unavailable samples become zero or old samples survive the capacity limit.
     static func historyCapacity() async throws {
-        let engine = MonitoringEngine(providers: providers(), historyCapacity: 300)
+        let engine = makeEngine(providers: providers(), historyCapacity: 300)
         for second in 1...301 { _ = await engine.sample(at: Date(timeIntervalSince1970: Double(second))) }
         let history = await engine.history
         for points in [history.cpu.elements, history.memory.elements, history.upload.elements, history.download.elements] {
@@ -197,7 +282,7 @@ private enum MonitoringChecks {
 
     // Fails if equal BSD names mask a changed underlying storage driver.
     static func diskDriverChange() async throws {
-        let engine = MonitoringEngine(providers: providers())
+        let engine = makeEngine(providers: providers())
         var samples: [MetricSnapshot] = []
         for second in 1...4 { samples.append(await engine.sample(at: Date(timeIntervalSince1970: Double(second)))) }
         try require(samples[0].disk.value?.readBytesPerSecond == nil, "First disk sample establishes baseline")
@@ -209,7 +294,7 @@ private enum MonitoringChecks {
 
     // Fails if start creates duplicate loops, stop keeps publishing, or restart cannot subscribe.
     static func lifecycle() async throws {
-        let engine = MonitoringEngine(providers: providers())
+        let engine = makeEngine(providers: providers())
         let stream = await engine.updates()
         var iterator = stream.makeAsyncIterator()
         await engine.start()
@@ -239,7 +324,7 @@ private enum MonitoringChecks {
 
     static func stopDuringSample() async throws {
         let memory = GatedMemoryProvider()
-        let engine = MonitoringEngine(providers: providers(memory: memory))
+        let engine = makeEngine(providers: providers(memory: memory))
         let stream = await engine.updates()
         await engine.start()
         while !(await memory.isSampling()) { await Task.yield() }
@@ -251,7 +336,7 @@ private enum MonitoringChecks {
     }
 
     static func cpuBaseline() async throws {
-        let engine = MonitoringEngine(providers: providers(cpu: AdvancingCPUProvider()))
+        let engine = makeEngine(providers: providers(cpu: AdvancingCPUProvider()))
         let first = await engine.sample(at: Date(timeIntervalSince1970: 1))
         let second = await engine.sample(at: Date(timeIntervalSince1970: 2))
         let history = await engine.history
@@ -263,7 +348,7 @@ private enum MonitoringChecks {
 
     static func pendingRestart() async throws {
         let memory = GatedMemoryProvider()
-        let engine = MonitoringEngine(providers: providers(memory: memory, cpu: AdvancingCPUProvider()))
+        let engine = makeEngine(providers: providers(memory: memory, cpu: AdvancingCPUProvider()))
         await engine.start()
         while !(await memory.isSampling()) { await Task.yield() }
         await engine.stop()
@@ -287,7 +372,7 @@ private enum MonitoringChecks {
 
     static func concurrentSamples() async throws {
         let memory = GatedMemoryProvider()
-        let engine = MonitoringEngine(providers: providers(memory: memory, cpu: AdvancingCPUProvider()))
+        let engine = makeEngine(providers: providers(memory: memory, cpu: AdvancingCPUProvider()))
         let first = Task { await engine.sample(at: Date(timeIntervalSince1970: 1)) }
         while !(await memory.isSampling()) { await Task.yield() }
         let second = Task { await engine.sample(at: Date(timeIntervalSince1970: 2)) }
@@ -303,7 +388,7 @@ private enum MonitoringChecks {
     }
 
     static func streamLifetime() async throws {
-        var engine: MonitoringEngine? = MonitoringEngine(providers: providers())
+        var engine: MonitoringEngine? = makeEngine(providers: providers())
         weak var weakEngine = engine
         let stream = await engine!.updates()
         engine = nil
@@ -325,7 +410,7 @@ private enum MonitoringChecks {
     // Fails if the consumption task retains the Store or survives cancellation.
     @MainActor
     static func storeLifetime() async throws {
-        let engine = MonitoringEngine(providers: providers())
+        let engine = makeEngine(providers: providers())
         var store: MonitoringStore? = MonitoringStore(engine: engine)
         weak var weakStore = store
         let deadline = ContinuousClock.now.advanced(by: .seconds(3))

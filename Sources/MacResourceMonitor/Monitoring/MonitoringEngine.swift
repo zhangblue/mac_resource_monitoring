@@ -29,6 +29,7 @@ struct MonitoringUpdate: Sendable {
 
 actor MonitoringEngine {
     private let providers: ProviderSet
+    private let logger: any DiagnosticLogging
     private var previousCPU: CPUTicks?
     private var networkCalculator = NetworkRateCalculator()
     private var diskCalculator = DiskRateCalculator()
@@ -41,8 +42,10 @@ actor MonitoringEngine {
     private var subscribers: [UUID: AsyncStream<MonitoringUpdate>.Continuation] = [:]
     private(set) var history: MetricHistory
 
-    init(providers: ProviderSet = .live, historyCapacity: Int = 300) {
+    init(providers: ProviderSet = .live, historyCapacity: Int = 300,
+         logger: any DiagnosticLogging = DiagnosticLogger.live) {
         self.providers = providers
+        self.logger = logger
         history = MetricHistory(capacity: historyCapacity)
     }
 
@@ -162,7 +165,8 @@ actor MonitoringEngine {
         return await (cpu, memory, network, disk, thermal)
     }
 
-    private func commit(_ readings: ProviderReadings, at date: Date, generation token: UUID) -> MonitoringUpdate {
+    private func commit(_ readings: ProviderReadings, at date: Date,
+                        generation token: UUID) async -> MonitoringUpdate {
         guard generation == token, !Task.isCancelled else {
             return MonitoringUpdate(snapshot: Self.cancelledSnapshot(at: date), history: history)
         }
@@ -171,7 +175,26 @@ actor MonitoringEngine {
                                       memory: readings.1, network: networkMetric(readings.2, at: date),
                                       thermal: readings.4, disk: diskMetric(readings.3, at: date))
         history.append(snapshot)
+        await recordDiagnostics(readings, at: date)
         return MonitoringUpdate(snapshot: snapshot, history: history)
+    }
+
+    private func recordDiagnostics(_ readings: ProviderReadings, at date: Date) async {
+        await record(.cpu, reading: readings.0, at: date)
+        await record(.memory, reading: readings.1, at: date)
+        await record(.network, reading: readings.2, at: date)
+        await record(.disk, reading: readings.3, at: date)
+        await record(.sensors, reading: readings.4, at: date)
+    }
+
+    private func record<Value>(_ component: DiagnosticComponent, reading: Reading<Value>,
+                               at date: Date) async {
+        let failure: String?
+        switch reading {
+        case .value: failure = nil
+        case let .unavailable(reason): failure = reason
+        }
+        try? await logger.record(component: component, failure: failure, at: date)
     }
 
     private func cpuUsage(_ reading: Reading<CPUTicks>) -> Reading<Double> {

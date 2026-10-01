@@ -44,9 +44,12 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("本地诊断日志位置")
                         .foregroundStyle(.secondary)
-                    Text("~/Library/Logs/MacResourceMonitor")
+                    Text(DiagnosticLogger.displayPath)
                         .font(.caption)
                         .textSelection(.enabled)
+                    Text("发生采集异常时创建")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
             }
             .font(.caption)
