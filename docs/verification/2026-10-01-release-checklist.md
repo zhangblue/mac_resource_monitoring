@@ -61,9 +61,9 @@
 
 ## 交付物
 
-- DMG：`/Users/zhangdi/works/workspace/github/mac_resource_monitoring/.worktrees/mac-resource-monitor/dist/MacResourceMonitor.dmg`
+- DMG：`/Users/zhangdi/works/workspace/github/mac_resource_monitoring/dist/MacResourceMonitor.dmg`
 - 大小：426809 bytes（约 416.8 KiB，使用 Xcode 26.3 工具链重建）
-- SHA-256：`31253ae735fa5d4a8b5f3b6c9380c57a148df41740f4ebe7721a2849b99dcac4`
+- SHA-256：`3bca15731f37b6676cd9d062cefcc3a1dd6548c8b5592abc15b12091e690018d`
 - 签名：ad-hoc
 - 公证：未公证
 
