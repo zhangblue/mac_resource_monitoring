@@ -120,6 +120,47 @@ final class SystemCalculatorTests: XCTestCase {
         XCTAssertEqual(capacity.totalBytes, 1_000)
     }
 
+    func testDiskCapacityParsesOnlyExactUnsignedIntegers() {
+        for (number, expected) in [
+            (NSNumber(value: 0), UInt64(0)),
+            (NSNumber(value: UInt64(1_000)), UInt64(1_000)),
+            (NSNumber(value: 100.0), UInt64(100)),
+            (NSNumber(value: UInt64.max), UInt64.max)
+        ] {
+            XCTAssertEqual(DiskCapacity.exactUInt64(number), expected)
+        }
+        for number in [
+            NSNumber(value: -1), NSNumber(value: -0.5), NSNumber(value: 100.5),
+            NSNumber(value: Double.nan), NSNumber(value: Double.infinity),
+            NSNumber(value: -Double.infinity),
+            NSDecimalNumber(string: "18446744073709551616")
+        ] {
+            XCTAssertNil(DiskCapacity.exactUInt64(number), "Rejected \(number)")
+        }
+    }
+
+    func testDiskCapacityAcceptsUInt64MaximumFromFilesystemAttributes() throws {
+        let capacity = try DiskCapacity.from([
+            .systemSize: NSNumber(value: UInt64.max),
+            .systemFreeSize: NSNumber(value: 0)
+        ])
+        XCTAssertEqual(capacity.usedBytes, UInt64.max)
+        XCTAssertEqual(capacity.totalBytes, UInt64.max)
+    }
+
+    func testDiskCapacityRejectsInvalidFilesystemNumbers() {
+        for number in [NSNumber(value: -0.5), NSNumber(value: 100.5),
+                       NSNumber(value: Double.nan), NSNumber(value: Double.infinity),
+                       NSDecimalNumber(string: "18446744073709551616")] {
+            XCTAssertThrowsError(try DiskCapacity.from([
+                .systemSize: number, .systemFreeSize: NSNumber(value: 0)
+            ]))
+            XCTAssertThrowsError(try DiskCapacity.from([
+                .systemSize: NSNumber(value: 1_000), .systemFreeSize: number
+            ]))
+        }
+    }
+
     func testDiskCapacityRejectsFreeSpaceAboveTotal() {
         XCTAssertThrowsError(try DiskCapacity.from([
             .systemSize: NSNumber(value: 1_000), .systemFreeSize: NSNumber(value: 1_001)

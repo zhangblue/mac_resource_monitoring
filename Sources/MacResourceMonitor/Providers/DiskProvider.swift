@@ -1,15 +1,24 @@
 import Foundation
 
 enum DiskCapacity {
+    static func exactUInt64(_ number: NSNumber) -> UInt64? {
+        guard number.doubleValue.isFinite,
+              let decimal = Decimal(string: number.stringValue,
+                                    locale: Locale(identifier: "en_US_POSIX")),
+              decimal >= 0 else { return nil }
+        return UInt64(NSDecimalNumber(decimal: decimal).stringValue)
+    }
+
     static func from(_ attributes: [FileAttributeKey: Any]) throws -> DiskMetric {
         guard let total = attributes[.systemSize] as? NSNumber,
               let free = attributes[.systemFreeSize] as? NSNumber,
-              total.int64Value >= 0, free.int64Value >= 0,
-              free.uint64Value <= total.uint64Value else {
+              let totalBytes = exactUInt64(total),
+              let freeBytes = exactUInt64(free),
+              freeBytes <= totalBytes else {
             throw DiskProviderError.capacityUnavailable
         }
-        return DiskMetric(usedBytes: total.uint64Value - free.uint64Value,
-                          totalBytes: total.uint64Value)
+        return DiskMetric(usedBytes: totalBytes - freeBytes,
+                          totalBytes: totalBytes)
     }
 }
 

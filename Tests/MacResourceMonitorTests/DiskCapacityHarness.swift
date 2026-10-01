@@ -4,12 +4,46 @@ import Foundation
 @main
 enum DiskCapacityHarness {
     static func main() throws {
+        for (number, expected) in [
+            (NSNumber(value: 0), UInt64(0)),
+            (NSNumber(value: UInt64(1_000)), UInt64(1_000)),
+            (NSNumber(value: 100.0), UInt64(100)),
+            (NSNumber(value: UInt64.max), UInt64.max)
+        ] {
+            try check(DiskCapacity.exactUInt64(number) == expected,
+                      "Valid unsigned integer converts without loss: \(number)")
+        }
+        for number in [
+            NSNumber(value: -1), NSNumber(value: -0.5), NSNumber(value: 100.5),
+            NSNumber(value: Double.nan), NSNumber(value: Double.infinity),
+            NSNumber(value: -Double.infinity),
+            NSDecimalNumber(string: "18446744073709551616")
+        ] {
+            try check(DiskCapacity.exactUInt64(number) == nil,
+                      "Invalid or unrepresentable number is rejected: \(number)")
+            do {
+                _ = try DiskCapacity.from([.systemSize: number,
+                                           .systemFreeSize: NSNumber(value: 0)])
+                throw HarnessError.failed("Invalid total size was accepted: \(number)")
+            } catch DiskProviderError.capacityUnavailable {}
+            do {
+                _ = try DiskCapacity.from([.systemSize: NSNumber(value: 1_000),
+                                           .systemFreeSize: number])
+                throw HarnessError.failed("Invalid free size was accepted: \(number)")
+            } catch DiskProviderError.capacityUnavailable {}
+        }
         let metric = try DiskCapacity.from([
             .systemSize: NSNumber(value: 1_000),
             .systemFreeSize: NSNumber(value: 250)
         ])
         try check(metric == DiskMetric(usedBytes: 750, totalBytes: 1_000),
                   "Filesystem capacity uses size minus free space")
+        let maximum = try DiskCapacity.from([
+            .systemSize: NSNumber(value: UInt64.max),
+            .systemFreeSize: NSNumber(value: 0)
+        ])
+        try check(maximum == DiskMetric(usedBytes: UInt64.max, totalBytes: UInt64.max),
+                  "UInt64 maximum survives filesystem capacity conversion")
         try check(DiskPresentation(reading: .value(.init(usedBytes: 25, totalBytes: 100))).capacityText
                   == "已用 25 B / 100 B", "Capacity text shows used and total bytes")
         try check(DiskPresentation(reading: .value(.init(usedBytes: 25, totalBytes: 100))).usedFraction
