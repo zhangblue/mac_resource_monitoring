@@ -29,15 +29,26 @@ final class DomainTests: XCTestCase {
         XCTAssertEqual(MetricFormatter.memory(1_536), "1.5 KiB")
         XCTAssertEqual(MetricFormatter.memory(1_572_864), "1.5 MiB")
         XCTAssertEqual(MetricFormatter.memory(1_610_612_736), "1.5 GiB")
+        XCTAssertEqual(MetricFormatter.memory(UInt64.max), "17179869184 GiB")
     }
 
     func testPercentAndRPMAreIntegersAndNegativeValuesClampToZero() {
         XCTAssertEqual(MetricFormatter.percent(42.6), "43%")
         XCTAssertEqual(MetricFormatter.rpm(1_234.6), "1235 RPM")
         XCTAssertEqual(MetricFormatter.rate(-100), "0 B/s")
-        XCTAssertEqual(MetricFormatter.memory(-100), "0 B")
         XCTAssertEqual(MetricFormatter.percent(-12), "0%")
         XCTAssertEqual(MetricFormatter.rpm(-12), "0 RPM")
+    }
+
+    func testFormatterHandlesNonFiniteAndOutOfRangeValuesDeterministically() {
+        XCTAssertEqual(MetricFormatter.rate(.nan), "0 B/s")
+        XCTAssertEqual(MetricFormatter.rate(.infinity), "0 B/s")
+        XCTAssertEqual(MetricFormatter.rate(-.infinity), "0 B/s")
+        XCTAssertEqual(MetricFormatter.percent(.infinity), "0%")
+        XCTAssertEqual(MetricFormatter.percent(-.infinity), "0%")
+        XCTAssertEqual(MetricFormatter.percent(.nan), "0%")
+        XCTAssertEqual(MetricFormatter.percent(Double.greatestFiniteMagnitude), "9223372036854775807%")
+        XCTAssertEqual(MetricFormatter.rpm(Double.greatestFiniteMagnitude), "9223372036854775807 RPM")
     }
 
     func testUnavailableHistoryPointRetainsTimestampAndNilValue() {
