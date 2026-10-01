@@ -24,3 +24,5 @@ struct RingBuffer<Element> {
         count = min(count + 1, capacity)
     }
 }
+
+extension RingBuffer: Sendable where Element: Sendable {}
