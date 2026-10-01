@@ -95,9 +95,10 @@ final class SystemCalculatorTests: XCTestCase {
     func testNetworkOnlyIncludesRunningPhysicalInterfaces() {
         let active = UInt32(IFF_UP | IFF_RUNNING)
         XCTAssertTrue(NetworkProvider.isEligible(name: "en0", family: AF_LINK, flags: active))
+        XCTAssertTrue(NetworkProvider.isEligible(name: "en1", family: AF_LINK, flags: active))
         XCTAssertFalse(NetworkProvider.isEligible(name: "en0", family: AF_INET, flags: active))
         XCTAssertFalse(NetworkProvider.isEligible(name: "en0", family: AF_LINK, flags: UInt32(IFF_UP)))
-        for prefix in ["lo", "utun", "awdl", "llw", "bridge", "vmenet"] {
+        for prefix in ["lo", "utun", "awdl", "llw", "bridge", "vmenet", "tap", "feth"] {
             XCTAssertFalse(NetworkProvider.isEligible(name: "\(prefix)0", family: AF_LINK, flags: active))
         }
     }
@@ -138,6 +139,31 @@ final class SystemCalculatorTests: XCTestCase {
         ])
         XCTAssertEqual(capacity.usedBytes, 750)
         XCTAssertEqual(capacity.totalBytes, 1_000)
+    }
+
+    func testDiskDriverSelectionRequiresOneUniqueIdentity() throws {
+        XCTAssertEqual(try DiskDriverSelection.uniqueID(from: [17, 17], bsdName: "disk3s1"), 17)
+        XCTAssertThrowsError(try DiskDriverSelection.uniqueID(from: [], bsdName: "disk3s1")) { error in
+            guard case let DiskProviderError.storageDriverNotFound(name) = error else {
+                return XCTFail("Expected no driver error")
+            }
+            XCTAssertEqual(name, "disk3s1")
+        }
+        XCTAssertThrowsError(try DiskDriverSelection.uniqueID(from: [17, 42], bsdName: "disk3s1")) { error in
+            guard case let DiskProviderError.ambiguousStorageDrivers(name, identifiers) = error else {
+                return XCTFail("Expected ambiguous driver error")
+            }
+            XCTAssertEqual(name, "disk3s1")
+            XCTAssertEqual(identifiers, [17, 42])
+        }
+    }
+
+    func testDiskCountersExposePhysicalDriverIdentity() {
+        let first = DiskCounters(read: 100, written: 200, usedBytes: 10, totalBytes: 20,
+                                 bsdName: "disk3s1", driverID: 17)
+        let second = DiskCounters(read: 100, written: 200, usedBytes: 10, totalBytes: 20,
+                                  bsdName: "disk3s1", driverID: 42)
+        XCTAssertNotEqual(first, second)
     }
 
     func testRateRejectsOneHundredGigabytesPerSecondBoundary() {

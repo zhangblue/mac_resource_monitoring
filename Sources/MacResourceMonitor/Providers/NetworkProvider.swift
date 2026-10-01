@@ -61,10 +61,8 @@ struct NetworkProvider: Sendable {
     static func isEligible(name: String, family: Int32, flags: UInt32) -> Bool {
         family == AF_LINK
             && flags & UInt32(IFF_UP | IFF_RUNNING) == UInt32(IFF_UP | IFF_RUNNING)
-            && !excludedPrefixes.contains(where: name.hasPrefix)
+            && name.hasPrefix("en")
     }
-
-    private static let excludedPrefixes = ["lo", "utun", "awdl", "llw", "bridge", "vmenet"]
 }
 
 enum NetworkProviderError: Error {

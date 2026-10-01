@@ -8,6 +8,20 @@ struct DiskCounters: Equatable, Sendable {
     let usedBytes: UInt64
     let totalBytes: UInt64
     let bsdName: String
+    let driverID: UInt64
+}
+
+enum DiskDriverSelection {
+    static func uniqueID(from identifiers: [UInt64], bsdName: String) throws -> UInt64 {
+        let unique = Array(Set(identifiers)).sorted()
+        guard let identifier = unique.first else {
+            throw DiskProviderError.storageDriverNotFound(bsdName)
+        }
+        guard unique.count == 1 else {
+            throw DiskProviderError.ambiguousStorageDrivers(bsdName, unique)
+        }
+        return identifier
+    }
 }
 
 struct DiskRates: Equatable, Sendable {
@@ -63,22 +77,51 @@ struct DiskProvider: Sendable {
         guard let matching = IOBSDNameMatching(kIOMainPortDefault, 0, bsdName) else {
             throw DiskProviderError.deviceNotFound(bsdName)
         }
-        var current = IOServiceGetMatchingService(kIOMainPortDefault, matching)
-        guard current != 0 else { throw DiskProviderError.deviceNotFound(bsdName) }
-        defer { IOObjectRelease(current) }
+        let bootService = IOServiceGetMatchingService(kIOMainPortDefault, matching)
+        guard bootService != 0 else { throw DiskProviderError.deviceNotFound(bsdName) }
+        defer { IOObjectRelease(bootService) }
 
-        while IOObjectConformsTo(current, "IOBlockStorageDriver") == 0 {
-            var parent: io_registry_entry_t = 0
-            let result = IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent)
-            guard result == KERN_SUCCESS, parent != 0 else {
-                throw DiskProviderError.storageDriverNotFound(bsdName)
+        var iterator: io_iterator_t = 0
+        let options = IOOptionBits(kIORegistryIterateParents | kIORegistryIterateRecursively)
+        let iteratorResult = IORegistryEntryCreateIterator(bootService, kIOServicePlane, options, &iterator)
+        guard iteratorResult == KERN_SUCCESS else {
+            if iterator != 0 { IOObjectRelease(iterator) }
+            throw SystemProviderError.machCallFailed("IORegistryEntryCreateIterator", iteratorResult)
+        }
+        guard iterator != 0 else { throw DiskProviderError.registryChanged(bsdName) }
+        defer { IOObjectRelease(iterator) }
+
+        var drivers: [UInt64: io_registry_entry_t] = [:]
+        defer { drivers.values.forEach { IOObjectRelease($0) } }
+        while true {
+            let entry = IOIteratorNext(iterator)
+            guard entry != 0 else { break }
+            guard IOObjectConformsTo(entry, "IOBlockStorageDriver") != 0 else {
+                IOObjectRelease(entry)
+                continue
             }
-            IOObjectRelease(current)
-            current = parent
+            var identifier: UInt64 = 0
+            let idResult = IORegistryEntryGetRegistryEntryID(entry, &identifier)
+            guard idResult == KERN_SUCCESS else {
+                IOObjectRelease(entry)
+                throw SystemProviderError.machCallFailed("IORegistryEntryGetRegistryEntryID", idResult)
+            }
+            if drivers[identifier] == nil {
+                drivers[identifier] = entry
+            } else {
+                IOObjectRelease(entry)
+            }
+        }
+        guard IOIteratorIsValid(iterator) != 0 else {
+            throw DiskProviderError.registryChanged(bsdName)
+        }
+        let driverID = try DiskDriverSelection.uniqueID(from: Array(drivers.keys), bsdName: bsdName)
+        guard let driver = drivers[driverID] else {
+            throw DiskProviderError.storageDriverNotFound(bsdName)
         }
 
         guard let property = IORegistryEntryCreateCFProperty(
-            current, "Statistics" as CFString, kCFAllocatorDefault, 0
+            driver, "Statistics" as CFString, kCFAllocatorDefault, 0
         )?.takeRetainedValue(),
               let statistics = property as? [String: NSNumber],
               let read = statistics["Bytes (Read)"],
@@ -91,7 +134,7 @@ struct DiskProvider: Sendable {
         return DiskCounters(
             read: read.uint64Value, written: written.uint64Value,
             usedBytes: capacity.usedBytes,
-            totalBytes: capacity.totalBytes, bsdName: bsdName
+            totalBytes: capacity.totalBytes, bsdName: bsdName, driverID: driverID
         )
     }
 }
@@ -100,6 +143,8 @@ enum DiskProviderError: Error {
     case invalidBootDevice(String)
     case deviceNotFound(String)
     case storageDriverNotFound(String)
+    case ambiguousStorageDrivers(String, [UInt64])
+    case registryChanged(String)
     case statisticsUnavailable(String)
     case capacityUnavailable
 }
