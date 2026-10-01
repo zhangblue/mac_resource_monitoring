@@ -34,28 +34,31 @@ struct CPUProvider: CPUProviding {
         guard result == KERN_SUCCESS, let info else {
             throw SystemProviderError.machCallFailed("host_processor_info", result)
         }
-        defer {
-            vm_deallocate(
-                mach_task_self_, vm_address_t(UInt(bitPattern: info)),
-                vm_size_t(Int(infoCount) * MemoryLayout<integer_t>.stride)
-            )
+        let stateCount = Int(CPU_STATE_MAX)
+        var ticks: CPUTicks?
+        if Int(infoCount) >= Int(cpuCount) * stateCount {
+            var user: UInt64 = 0
+            var system: UInt64 = 0
+            var nice: UInt64 = 0
+            var idle: UInt64 = 0
+            for cpu in 0..<Int(cpuCount) {
+                let offset = cpu * stateCount
+                user += UInt64(UInt32(bitPattern: info[offset + Int(CPU_STATE_USER)]))
+                system += UInt64(UInt32(bitPattern: info[offset + Int(CPU_STATE_SYSTEM)]))
+                nice += UInt64(UInt32(bitPattern: info[offset + Int(CPU_STATE_NICE)]))
+                idle += UInt64(UInt32(bitPattern: info[offset + Int(CPU_STATE_IDLE)]))
+            }
+            ticks = CPUTicks(user: user, system: system, nice: nice, idle: idle)
         }
 
-        var user: UInt64 = 0
-        var system: UInt64 = 0
-        var nice: UInt64 = 0
-        var idle: UInt64 = 0
-        let stateCount = Int(CPU_STATE_MAX)
-        guard Int(infoCount) >= Int(cpuCount) * stateCount else {
+        let deallocationResult = vm_deallocate(
+            mach_task_self_, vm_address_t(UInt(bitPattern: info)),
+            vm_size_t(Int(infoCount) * MemoryLayout<integer_t>.stride)
+        )
+        try SystemProviderError.check("vm_deallocate", result: deallocationResult)
+        guard let ticks else {
             throw SystemProviderError.machCallFailed("host_processor_info count", KERN_FAILURE)
         }
-        for cpu in 0..<Int(cpuCount) {
-            let offset = cpu * stateCount
-            user += UInt64(UInt32(bitPattern: info[offset + Int(CPU_STATE_USER)]))
-            system += UInt64(UInt32(bitPattern: info[offset + Int(CPU_STATE_SYSTEM)]))
-            nice += UInt64(UInt32(bitPattern: info[offset + Int(CPU_STATE_NICE)]))
-            idle += UInt64(UInt32(bitPattern: info[offset + Int(CPU_STATE_IDLE)]))
-        }
-        return CPUTicks(user: user, system: system, nice: nice, idle: idle)
+        return ticks
     }
 }

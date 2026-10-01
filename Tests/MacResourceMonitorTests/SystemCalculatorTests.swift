@@ -1,7 +1,22 @@
+import Darwin
 import XCTest
 @testable import MacResourceMonitor
 
 final class SystemCalculatorTests: XCTestCase {
+    func testFailedDeallocationMapsToMachError() {
+        XCTAssertThrowsError(try SystemProviderError.check("vm_deallocate", result: KERN_FAILURE)) { error in
+            guard case let SystemProviderError.machCallFailed(operation, code) = error else {
+                return XCTFail("Expected a Mach call error")
+            }
+            XCTAssertEqual(operation, "vm_deallocate")
+            XCTAssertEqual(code, KERN_FAILURE)
+        }
+    }
+
+    func testSuccessfulDeallocationResultDoesNotThrow() {
+        XCTAssertNoThrow(try SystemProviderError.check("vm_deallocate", result: KERN_SUCCESS))
+    }
+
     func testCPUUsageUsesDeltaAndExcludesIdle() {
         let old = CPUTicks(user: 100, system: 50, nice: 0, idle: 850)
         let new = CPUTicks(user: 160, system: 70, nice: 0, idle: 870)
