@@ -25,3 +25,15 @@
 
 - 自审确认仅新增模型与模型测试；没有改动 SwiftUI、采样频率、历史窗口或底层采样值。
 - 无功能疑虑。构建仍报告既有测试中的 `weak var` 未修改警告；测试宿主报告平台为 arm64e macOS 14.0，未单独验证 macOS 13。
+
+## 修复第 1 轮：速率轴两侧留白
+
+- 发现：原下界直接按数据最小值向下对齐，可能令非零基线紧贴坐标轴底边。
+- 测试先行：将基线样本下界/上界断言改为严格小于/大于，并新增恒定 8 MB/s 两侧留白测试。
+- RED 命令：`CLANG_MODULE_CACHE_PATH=/private/tmp/codex-axis-module-cache swift test --scratch-path /private/tmp/codex-axis-build --filter SparklineAxisPresentationTests`
+  - 关键输出：`XCTAssertLessThan failed: ("8000000.0") is not less than ("8000000.0")`；两项留白测试失败，其余测试通过。
+- 实现：先按目标跨度对样本范围两侧扩展，再对扩展后的下界执行 nice-step 刻度对齐；若对齐后的上界不足以容纳扩展区间，则增大步长。
+- GREEN 聚焦命令同 RED；关键输出：`Executed 7 tests, with 0 failures`。
+- 完整命令：`CLANG_MODULE_CACHE_PATH=/private/tmp/codex-axis-module-cache swift test --scratch-path /private/tmp/codex-axis-build`
+  - 关键输出：`Executed 89 tests, with 0 failures`。
+- `git diff --check` 通过。

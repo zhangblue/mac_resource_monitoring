@@ -49,14 +49,18 @@ struct SparklineAxisPresentation: Equatable {
 
     private static func rateBounds(minimum: Double, maximum: Double) -> (lower: Double, upper: Double) {
         let midpoint = (minimum + maximum) / 2
-        let targetSpan = max((maximum - minimum) * 1.2, abs(midpoint) * 0.2, 1024)
+        let dataSpan = maximum - minimum
+        let targetSpan = max(dataSpan * 1.2, abs(midpoint) * 0.2, 1024)
+        let padding = (targetSpan - dataSpan) / 2
+        let paddedMinimum = max(0, minimum - padding)
+        let paddedMaximum = maximum + padding
         var step = niceStep(atLeast: targetSpan / 2)
-        var lower = floor(minimum / step) * step
+        var lower = floor(paddedMinimum / step) * step
         var upper = lower + 2 * step
 
-        while upper < maximum {
+        while upper < paddedMaximum {
             step = niceStep(atLeast: step * 1.01)
-            lower = floor(minimum / step) * step
+            lower = floor(paddedMinimum / step) * step
             upper = lower + 2 * step
         }
         lower = max(0, lower)

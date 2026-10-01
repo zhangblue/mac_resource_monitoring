@@ -28,10 +28,16 @@ final class SparklineAxisPresentationTests: XCTestCase {
     func testRateRangeDoesNotForceZeroWhenTrafficHasBaseline() throws {
         let axis = try XCTUnwrap(SparklineAxisPresentation(values: [8_000_000, 8_200_000, 8_400_000], kind: .rate))
         XCTAssertGreaterThan(axis.domain.lowerBound, 0)
-        XCTAssertLessThanOrEqual(axis.domain.lowerBound, 8_000_000)
-        XCTAssertGreaterThanOrEqual(axis.domain.upperBound, 8_400_000)
+        XCTAssertLessThan(axis.domain.lowerBound, 8_000_000)
+        XCTAssertGreaterThan(axis.domain.upperBound, 8_400_000)
         XCTAssertEqual(axis.ticks.count, 3)
         XCTAssertTrue(axis.labels.allSatisfy { $0.contains("MB/s") })
+    }
+
+    func testConstantRateHasMarginOnBothSides() throws {
+        let axis = try XCTUnwrap(SparklineAxisPresentation(values: [8_000_000, 8_000_000], kind: .rate))
+        XCTAssertLessThan(axis.domain.lowerBound, 8_000_000)
+        XCTAssertGreaterThan(axis.domain.upperBound, 8_000_000)
     }
 
     func testConstantAndNearZeroRatesHaveSafeRanges() throws {
