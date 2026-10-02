@@ -12,8 +12,60 @@ final class MonitoringEngineTests: XCTestCase {
         try await MonitoringChecks.failureIsolation()
     }
 
-    func testHistoryKeepsNewest300PointsAndUnavailableGaps() async throws {
-        try await MonitoringChecks.historyCapacity()
+    // Fails if trimming excludes the lower boundary or retains points after clock rollback.
+    func testHistoryUsesInclusiveTimeWindowAndRemovesFuturePointsAfterRollback() {
+        var history = MetricHistory(historyDuration: .oneMinute)
+        history.append(.fixture(at: 939))
+        history.append(.fixture(at: 940))
+        history.append(.fixture(at: 1_000))
+        history.append(.fixture(at: 999))
+        XCTAssertEqual(history.cpu.elements.map { $0.timestamp.timeIntervalSince1970 }, [940, 999])
+        for points in [history.memory.elements, history.upload.elements, history.download.elements] {
+            XCTAssertEqual(points.map { $0.timestamp.timeIntervalSince1970 }, [940, 999])
+        }
+    }
+
+    // Fails if duration changes delay trimming or reconstruct discarded points.
+    func testShorteningTrimsImmediatelyAndExtendingDoesNotInventPoints() {
+        var history = MetricHistory(historyDuration: .tenMinutes)
+        for second in stride(from: 0, through: 600, by: 60) {
+            history.append(.fixture(at: TimeInterval(second)))
+        }
+        history.updateDuration(.oneMinute, endingAt: Date(timeIntervalSince1970: 600))
+        XCTAssertEqual(history.cpu.elements.count, 2)
+        history.updateDuration(.tenMinutes, endingAt: Date(timeIntervalSince1970: 600))
+        XCTAssertEqual(history.cpu.elements.count, 2)
+        for points in [history.cpu.elements, history.memory.elements,
+                       history.upload.elements, history.download.elements] {
+            XCTAssertEqual(points.map { $0.timestamp.timeIntervalSince1970 }, [540, 600])
+        }
+    }
+
+    // Fails if a full inclusive ten-minute window exceeds the fixed memory ceiling.
+    func testHistoryNeverExceedsSixHundredPoints() {
+        var history = MetricHistory(historyDuration: .tenMinutes)
+        for second in 0...700 { history.append(.fixture(at: TimeInterval(second))) }
+        XCTAssertEqual(history.cpu.count, 600)
+        XCTAssertEqual(history.cpu.elements.first?.timestamp.timeIntervalSince1970, 101)
+        for points in [history.memory.elements, history.upload.elements, history.download.elements] {
+            XCTAssertEqual(points.count, 600)
+            XCTAssertEqual(points.first?.timestamp.timeIntervalSince1970, 101)
+            XCTAssertEqual(points.last?.timestamp.timeIntervalSince1970, 700)
+        }
+    }
+
+    // Fails if changing duration without a snapshot endpoint loses the next window choice.
+    func testDurationUpdateWithoutEndpointAppliesToNextSnapshot() {
+        var history = MetricHistory()
+        history.updateDuration(.oneMinute, endingAt: nil)
+        history.append(.fixture(at: 0))
+        history.append(.fixture(at: 61))
+        XCTAssertEqual(history.historyDuration, .oneMinute)
+        XCTAssertEqual(history.cpu.elements.map { $0.timestamp.timeIntervalSince1970 }, [61])
+    }
+
+    func testHistoryPreservesUnavailableGaps() async throws {
+        try await MonitoringChecks.historyUnavailableGaps()
     }
 
     func testDiskCapacityIsAvailableOnEverySample() async throws {
@@ -85,7 +137,7 @@ enum MonitoringHarness {
         try await MonitoringChecks.concurrentSamples()
         try await MonitoringChecks.streamLifetime()
         try await MonitoringChecks.failureIsolation()
-        try await MonitoringChecks.historyCapacity()
+        try await MonitoringChecks.historyUnavailableGaps()
         try await MonitoringChecks.diskCapacityEverySample()
         try await MonitoringChecks.diskCapacityFailureIsolation()
         try await MonitoringChecks.lifecycle()
@@ -101,6 +153,16 @@ enum MonitoringHarness {
     }
 }
 #endif
+
+private extension MetricSnapshot {
+    static func fixture(at second: TimeInterval) -> MetricSnapshot {
+        MetricSnapshot(timestamp: Date(timeIntervalSince1970: second), cpuUsage: .value(0.25),
+                       memory: .value(MemoryMetric(usage: 0.5, usedBytes: 500, totalBytes: 1_000)),
+                       network: .value(NetworkMetric(downloadBytesPerSecond: 100, uploadBytesPerSecond: 50)),
+                       thermal: .value(ThermalMetric(chipTemperatureCelsius: 40, fan: .fanless)),
+                       disk: .value(DiskMetric(usedBytes: 500, totalBytes: 1_000)))
+    }
+}
 
 private enum MonitoringTestError: Error { case failed, assertion(String) }
 
@@ -376,9 +438,8 @@ private enum MonitoringChecks {
                     disk: FakeDiskProvider(), sensors: sensors)
     }
 
-    static func makeEngine(providers: ProviderSet, historyCapacity: Int = 300) -> MonitoringEngine {
-        MonitoringEngine(providers: providers, historyCapacity: historyCapacity,
-                         logger: SilentDiagnosticLogger())
+    static func makeEngine(providers: ProviderSet) -> MonitoringEngine {
+        MonitoringEngine(providers: providers, logger: SilentDiagnosticLogger())
     }
 
     // Fails if a thrown memory read cancels other providers, or nil temperature becomes unavailable.
@@ -409,15 +470,13 @@ private enum MonitoringChecks {
                     "Counter failures preserve independent memory and sensors")
     }
 
-    // Fails if unavailable samples become zero or old samples survive the capacity limit.
-    static func historyCapacity() async throws {
-        let engine = makeEngine(providers: providers(), historyCapacity: 300)
-        for second in 1...301 { _ = await engine.sample(at: Date(timeIntervalSince1970: Double(second))) }
+    // Fails if unavailable samples become zero instead of chart gaps.
+    static func historyUnavailableGaps() async throws {
+        let engine = makeEngine(providers: providers())
+        for second in 1...3 { _ = await engine.sample(at: Date(timeIntervalSince1970: Double(second))) }
         let history = await engine.history
         for points in [history.cpu.elements, history.memory.elements, history.upload.elements, history.download.elements] {
-            try require(points.count == 300, "History retains exactly 300 samples")
-            try require(points.first?.timestamp == Date(timeIntervalSince1970: 2), "Oldest sample is discarded")
-            try require(points.last?.timestamp == Date(timeIntervalSince1970: 301), "Newest sample is retained")
+            try require(points.count == 3, "Each collected sample adds a history point")
         }
         try require(history.memory.elements.allSatisfy { $0.value == nil }, "Failures create chart gaps")
         try require(history.cpu.elements.allSatisfy { $0.value == nil }, "Zero CPU tick delta is unknown")

@@ -23,6 +23,13 @@ struct RingBuffer<Element> {
         writeIndex = (writeIndex + 1) % capacity
         count = min(count + 1, capacity)
     }
+
+    mutating func replaceContents<S: Sequence>(with elements: S) where S.Element == Element {
+        storage = Array(repeating: nil, count: capacity)
+        writeIndex = 0
+        count = 0
+        for element in elements { append(element) }
+    }
 }
 
 extension RingBuffer: Sendable where Element: Sendable {}

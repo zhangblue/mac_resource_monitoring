@@ -1,16 +1,15 @@
 import Foundation
 
 struct MetricHistory: Sendable {
-    var cpu: RingBuffer<HistoryPoint>
-    var memory: RingBuffer<HistoryPoint>
-    var upload: RingBuffer<HistoryPoint>
-    var download: RingBuffer<HistoryPoint>
+    private static let maximumPointCount = 600
+    private(set) var historyDuration: HistoryDuration
+    var cpu = RingBuffer<HistoryPoint>(capacity: maximumPointCount)
+    var memory = RingBuffer<HistoryPoint>(capacity: maximumPointCount)
+    var upload = RingBuffer<HistoryPoint>(capacity: maximumPointCount)
+    var download = RingBuffer<HistoryPoint>(capacity: maximumPointCount)
 
-    init(capacity: Int = 300) {
-        cpu = RingBuffer(capacity: capacity)
-        memory = RingBuffer(capacity: capacity)
-        upload = RingBuffer(capacity: capacity)
-        download = RingBuffer(capacity: capacity)
+    init(historyDuration: HistoryDuration = .fiveMinutes) {
+        self.historyDuration = historyDuration
     }
 
     mutating func append(_ snapshot: MetricSnapshot) {
@@ -19,6 +18,21 @@ struct MetricHistory: Sendable {
         memory.append(HistoryPoint(timestamp: date, value: snapshot.memory.value?.usage))
         upload.append(HistoryPoint(timestamp: date, value: snapshot.network.value?.uploadBytesPerSecond))
         download.append(HistoryPoint(timestamp: date, value: snapshot.network.value?.downloadBytesPerSecond))
+        trim(endingAt: date)
+    }
+
+    mutating func updateDuration(_ duration: HistoryDuration, endingAt end: Date?) {
+        historyDuration = duration
+        if let end { trim(endingAt: end) }
+    }
+
+    private mutating func trim(endingAt end: Date) {
+        let start = end.addingTimeInterval(-TimeInterval(historyDuration.rawValue))
+        let isInWindow: (HistoryPoint) -> Bool = { $0.timestamp >= start && $0.timestamp <= end }
+        cpu.replaceContents(with: cpu.elements.filter(isInWindow))
+        memory.replaceContents(with: memory.elements.filter(isInWindow))
+        upload.replaceContents(with: upload.elements.filter(isInWindow))
+        download.replaceContents(with: download.elements.filter(isInWindow))
     }
 }
 
@@ -42,13 +56,13 @@ actor MonitoringEngine {
     private var subscribers: [UUID: AsyncStream<MonitoringUpdate>.Continuation] = [:]
     private(set) var history: MetricHistory
 
-    init(providers: ProviderSet = .live, historyCapacity: Int = 300,
+    init(providers: ProviderSet = .live,
          logger: any DiagnosticLogging = DiagnosticLogger.live,
          sleepMonitor: SystemSleepMonitor = SystemSleepMonitor()) {
         self.providers = providers
         self.logger = logger
         self.sleepMonitor = sleepMonitor
-        history = MetricHistory(capacity: historyCapacity)
+        history = MetricHistory()
     }
 
     deinit {
