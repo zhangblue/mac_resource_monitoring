@@ -11,7 +11,7 @@ struct DashboardView: View {
     var body: some View {
         Group {
             if showingSettings {
-                SettingsView(loginItemManager: loginItemManager) {
+                SettingsView(loginItemManager: loginItemManager, settings: store.settings) {
                     showingSettings = false
                 }
             } else {

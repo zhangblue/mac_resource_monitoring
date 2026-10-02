@@ -6,11 +6,26 @@ final class MonitoringStore: ObservableObject {
     @Published private(set) var snapshot: MetricSnapshot?
     @Published private(set) var history = MetricHistory()
 
+    let settings: MonitoringSettings
+
     private let engine: MonitoringEngine
     private var consumption: Task<Void, Never>?
+    private var settingsSubscription: AnyCancellable?
 
-    init(engine: MonitoringEngine = MonitoringEngine()) {
-        self.engine = engine
+    init(settings: MonitoringSettings? = nil, engine: MonitoringEngine? = nil) {
+        let settings = settings ?? MonitoringSettings()
+        self.settings = settings
+        self.engine = engine ?? MonitoringEngine(configuration: settings.configuration)
+        settingsSubscription = settings.$refreshInterval
+            .combineLatest(settings.$historyDuration)
+            .dropFirst()
+            .sink { [weak self] refresh, history in
+                guard let self else { return }
+                let engine = self.engine
+                Task {
+                    await engine.updateConfiguration(.init(refreshInterval: refresh, historyDuration: history))
+                }
+            }
         start()
     }
 

@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var loginItemManager: LoginItemManager
+    @ObservedObject var settings: MonitoringSettings
     let onBack: () -> Void
 
     @State private var loginError: String?
@@ -36,10 +37,27 @@ struct SettingsView: View {
                 }
             }
 
+            VStack(alignment: .leading, spacing: 12) {
+                Text("监控").font(.subheadline.weight(.semibold))
+                Picker("刷新时间", selection: $settings.refreshInterval) {
+                    ForEach(RefreshInterval.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Picker("保留最近时间", selection: $settings.historyDuration) {
+                    ForEach(HistoryDuration.allCases) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
             Divider()
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("每 1 秒刷新 · 保留最近 5 分钟")
+                Text(settings.summary)
                 LabeledContent("版本", value: version)
                 VStack(alignment: .leading, spacing: 4) {
                     Text("本地诊断日志位置")

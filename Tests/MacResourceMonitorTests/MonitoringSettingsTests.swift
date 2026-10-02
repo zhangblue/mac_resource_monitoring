@@ -62,4 +62,25 @@ final class MonitoringSettingsTests: XCTestCase {
         XCTAssertEqual(settings.refreshInterval, .oneSecond)
         XCTAssertEqual(settings.historyDuration, .fiveMinutes)
     }
+
+    func testStoreForwardsSettingsChangesToInjectedEngine() async {
+        let settings = MonitoringSettings(defaults: defaults)
+        let engine = MonitoringEngine(configuration: settings.configuration)
+        let store = MonitoringStore(settings: settings, engine: engine)
+
+        settings.refreshInterval = .threeSeconds
+        settings.historyDuration = .tenMinutes
+
+        let expected = MonitoringConfiguration(refreshInterval: .threeSeconds, historyDuration: .tenMinutes)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        var actual = await engine.configuration
+        while actual != expected && ContinuousClock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(10))
+            actual = await engine.configuration
+        }
+
+        store.stop()
+        await engine.stop()
+        XCTAssertEqual(actual, expected)
+    }
 }
