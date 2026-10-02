@@ -193,7 +193,16 @@ actor MonitoringEngine {
         guard generation == token, !Task.isCancelled else { return }
         let update = await sampledUpdate(at: Date())
         guard generation == token, !Task.isCancelled else { return }
-        for continuation in subscribers.values { continuation.yield(update) }
+        publish(update)
+    }
+
+    func publish(_ update: MonitoringUpdate) {
+        // Configuration may change after commit while the caller resumes from its await.
+        // Keep this history paired with its own snapshot, even if another sample has committed.
+        var history = update.history
+        history.updateDuration(configuration.historyDuration, endingAt: update.snapshot.timestamp)
+        let currentUpdate = MonitoringUpdate(snapshot: update.snapshot, history: history)
+        for continuation in subscribers.values { continuation.yield(currentUpdate) }
     }
 
     private func isCurrent(_ token: UUID) -> Bool { generation == token }

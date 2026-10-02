@@ -16,6 +16,14 @@ final class MonitoringEngineTests: XCTestCase {
         try await MonitoringChecks.configurationTrimsAndPublishes()
     }
 
+    func testConfigurationChangeBetweenCommitAndPublishCannotRestoreOldHistory() async throws {
+        try await MonitoringChecks.configurationBetweenCommitAndPublish()
+    }
+
+    func testDelayedPublicationKeepsSnapshotAndHistoryPairedAfterNewerCommit() async throws {
+        try await MonitoringChecks.configurationBetweenCommitAndPublish(newerCommit: true)
+    }
+
     func testShorterRefreshIntervalCancelsOldWaitAndKeepsHistory() async throws {
         try await MonitoringChecks.shorterIntervalWakesLoop()
     }
@@ -496,6 +504,37 @@ private enum MonitoringChecks {
                     "Existing stream receives immediately trimmed history")
         try require(update?.snapshot.timestamp == Date(timeIntervalSince1970: 600),
                     "History publication reuses the latest committed snapshot")
+    }
+
+    // Fails if a delayed publication overwrites the newest buffer with a pre-configuration history copy.
+    static func configurationBetweenCommitAndPublish(newerCommit: Bool = false) async throws {
+        let engine = makeEngine(providers: providers(cpu: AdvancingCPUProvider()), configuration: .init(
+            refreshInterval: .fiveSeconds, historyDuration: .fiveMinutes))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 0))
+        let committed = await engine.sample(at: Date(timeIntervalSince1970: 300))
+        let delayed = MonitoringUpdate(snapshot: committed, history: await engine.history)
+        try require(delayed.history.cpu.count == 2, "Committed update retains both points in the old window")
+        if newerCommit { _ = await engine.sample(at: Date(timeIntervalSince1970: 360)) }
+        let stream = await engine.updates()
+
+        // Deliberately order commit -> configuration publication -> delayed sample publication.
+        // No consumer reads until both yields have completed, exercising bufferingNewest(1).
+        await engine.updateConfiguration(.init(refreshInterval: .fiveSeconds, historyDuration: .oneMinute))
+        await engine.publish(delayed)
+        let recorder = UpdateRecorder()
+        let consumer = record(stream, in: recorder)
+        let arrived = await waitUntil { await recorder.values.count == 1 }
+        await engine.stop()
+        consumer.cancel()
+        await consumer.value
+        let update = await recorder.values.first
+        try require(arrived && update?.history.historyDuration == .oneMinute
+                    && update?.history.cpu.elements.map(\.timestamp) == [Date(timeIntervalSince1970: 300)],
+                    "Buffered delayed publication cannot restore history removed by the new configuration")
+        try require(update?.snapshot.timestamp == committed.timestamp
+                    && update?.snapshot.cpuUsage.value == committed.cpuUsage.value
+                    && update?.snapshot.disk.value?.usedBytes == committed.disk.value?.usedBytes,
+                    "History normalization preserves the original committed snapshot")
     }
 
     // Fails if interval changes cancel the loop, retain its old sleep, or reset history/baselines.
