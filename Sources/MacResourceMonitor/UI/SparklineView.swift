@@ -34,9 +34,12 @@ struct SparklineView: View {
     let points: [HistoryPoint]
     let style: SparklineStyle
     let emptyMessage: String
+    let historyDuration: HistoryDuration
+    let refreshInterval: RefreshInterval
 
     var body: some View {
-        let presentation = SparklinePresentation(points: points)
+        let presentation = SparklinePresentation(points: points, historyDuration: historyDuration,
+                                                 refreshInterval: refreshInterval)
         let segments = presentation.segments
         let axis = SparklineAxisPresentation(values: presentation.visibleValues, kind: style.axisKind)
 
@@ -84,8 +87,8 @@ struct SparklineView: View {
                         }
                     }
                 }
-                .chartXScale(domain: (points.last?.timestamp.addingTimeInterval(-300) ?? .distantPast)...(points.last?.timestamp ?? Date()))
-                .accessibilityLabel("\(style.name)最近五分钟趋势，纵轴范围 \(axis.labels[0]) 至 \(axis.labels[2])")
+                .chartXScale(domain: presentation.timeDomain)
+                .accessibilityLabel("\(style.name)\(historyDuration.recentLabel)趋势，纵轴范围 \(axis.labels[0]) 至 \(axis.labels[2])")
             }
         }
         .frame(height: 64)

@@ -56,20 +56,23 @@ private extension Reading where Value == Double? {
 
 struct SparklinePresentation {
     let segments: [[HistoryPoint]]
+    let timeDomain: ClosedRange<Date>
 
     var visibleValues: [Double] { segments.flatMap { $0.compactMap(\.value) } }
 
-    init(points: [HistoryPoint]) {
+    init(points: [HistoryPoint], historyDuration: HistoryDuration, refreshInterval: RefreshInterval) {
         var segments: [[HistoryPoint]] = []
         var current: [HistoryPoint] = []
         let end = points.last?.timestamp ?? .distantPast
-        let cutoff = end.addingTimeInterval(-300)
+        let cutoff = end.addingTimeInterval(-TimeInterval(historyDuration.rawValue))
+        timeDomain = cutoff...end
+        let discontinuityThreshold = TimeInterval(refreshInterval.rawValue * 3)
         for point in points where point.timestamp >= cutoff && point.timestamp <= end {
-            // One-second sampling may jitter; a gap above three seconds is a
-            // discontinuity, as is a duplicate/backward wall-clock timestamp.
+            // Allow up to three expected intervals of jitter, but split duplicate
+            // and backward wall-clock timestamps as well as longer gaps.
             if let previous = current.last {
                 let interval = point.timestamp.timeIntervalSince(previous.timestamp)
-                if interval <= 0 || interval > 3 {
+                if interval <= 0 || interval > discontinuityThreshold {
                     segments.append(current)
                     current = []
                 }
@@ -87,10 +90,10 @@ struct SparklinePresentation {
 }
 
 enum MetricPresentation {
-    static func status<Value>(for reading: Reading<Value>?) -> String {
+    static func status<Value>(for reading: Reading<Value>?, historyDuration: HistoryDuration) -> String {
         guard let reading else { return "等待下一次采样" }
         switch reading {
-        case .value: return "最近五分钟"
+        case .value: return historyDuration.recentLabel
         case let .unavailable(reason):
             return reason == "等待 CPU 采样基线" ? "等待下一次采样" : "暂不可用"
         }

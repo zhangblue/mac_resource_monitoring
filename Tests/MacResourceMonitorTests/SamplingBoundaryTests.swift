@@ -66,20 +66,28 @@ private enum BoundaryChecks {
 
     // Bridging a short sleep or treating normal cadence jitter as a gap must fail.
     static func chartGaps() throws {
-        func segments(_ seconds: [Double]) -> [Int] {
+        func segments(_ seconds: [Double], refreshInterval: RefreshInterval = .oneSecond) -> [Int] {
             SparklinePresentation(points: seconds.map {
                 HistoryPoint(timestamp: Date(timeIntervalSince1970: $0), value: 0.5)
-            }).segments.map(\.count)
+            }, historyDuration: .fiveMinutes, refreshInterval: refreshInterval).segments.map(\.count)
         }
         try checkBoundary(segments([0, 1, 121, 122]) == [2, 2], "Chart bridges a 120-second sleep")
         try checkBoundary(segments([0, 1.8, 4.8]) == [3], "Chart must tolerate jitter and a 3-second boundary")
         try checkBoundary(segments([0, 3.001]) == [1, 1], "Chart must split above 3 seconds")
+        try checkBoundary(segments([0, 3, 6], refreshInterval: .threeSeconds) == [3], "Normal 3-second sampling must connect")
+        try checkBoundary(segments([0, 9], refreshInterval: .threeSeconds) == [2], "3-second sampling tolerates its 9-second threshold")
+        try checkBoundary(segments([0, 9.001], refreshInterval: .threeSeconds) == [1, 1], "3-second sampling splits above 9 seconds")
+        try checkBoundary(segments([0, 5, 10], refreshInterval: .fiveSeconds) == [3], "Normal 5-second sampling must connect")
+        try checkBoundary(segments([0, 15], refreshInterval: .fiveSeconds) == [2], "5-second sampling tolerates its 15-second threshold")
+        try checkBoundary(segments([0, 15.001], refreshInterval: .fiveSeconds) == [1, 1], "5-second sampling splits above 15 seconds")
+        try checkBoundary(segments([0, 3, 123, 126], refreshInterval: .threeSeconds) == [2, 2], "3-second sampling must split a 120-second sleep")
+        try checkBoundary(segments([0, 5, 125, 130], refreshInterval: .fiveSeconds) == [2, 2], "5-second sampling must split a 120-second sleep")
         try checkBoundary(segments([0, 0, 1]) == [1, 2], "Duplicate timestamps must not connect")
         try checkBoundary(segments([1, 0, 1]) == [1, 2], "Backward clock changes must not connect")
         let withMissing = [HistoryPoint(timestamp: Date(timeIntervalSince1970: 0), value: 1),
                            HistoryPoint(timestamp: Date(timeIntervalSince1970: 1), value: nil),
                            HistoryPoint(timestamp: Date(timeIntervalSince1970: 2), value: 1)]
-        try checkBoundary(SparklinePresentation(points: withMissing).segments.map(\.count) == [1, 1],
+        try checkBoundary(SparklinePresentation(points: withMissing, historyDuration: .fiveMinutes, refreshInterval: .oneSecond).segments.map(\.count) == [1, 1],
                           "Unavailable samples still break the chart")
     }
 

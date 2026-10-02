@@ -29,17 +29,21 @@ struct DashboardView: View {
 
             LazyVGrid(columns: columns, spacing: 12) {
                 MetricCardView(title: "CPU", value: percent(store.snapshot?.cpuUsage),
-                               detail: MetricPresentation.status(for: store.snapshot?.cpuUsage),
-                               points: store.history.cpu.elements, sparklineStyle: .cpu)
+                               detail: MetricPresentation.status(for: store.snapshot?.cpuUsage, historyDuration: store.settings.historyDuration),
+                               points: store.history.cpu.elements, sparklineStyle: .cpu,
+                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval)
                 MetricCardView(title: "内存", value: percent(store.snapshot?.memory.map(\.usage)),
                                detail: memoryDetail,
-                               points: store.history.memory.elements, sparklineStyle: .memory)
+                               points: store.history.memory.elements, sparklineStyle: .memory,
+                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval)
                 MetricCardView(title: "上传", value: rate(store.snapshot?.network.value?.uploadBytesPerSecond),
                                detail: networkStatus(store.snapshot?.network.value?.uploadBytesPerSecond),
-                               points: store.history.upload.elements, sparklineStyle: .upload)
+                               points: store.history.upload.elements, sparklineStyle: .upload,
+                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval)
                 MetricCardView(title: "下载", value: rate(store.snapshot?.network.value?.downloadBytesPerSecond),
                                detail: networkStatus(store.snapshot?.network.value?.downloadBytesPerSecond),
-                               points: store.history.download.elements, sparklineStyle: .download)
+                               points: store.history.download.elements, sparklineStyle: .download,
+                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval)
                 MetricCardView(title: "芯片温度", value: temperature,
                                detail: MetricPresentation.temperatureStatus(for: store.snapshot?.thermal))
                 MetricCardView(title: "风扇", value: fan,
@@ -96,15 +100,17 @@ struct DashboardView: View {
     }
 
     private var memoryDetail: String {
-        guard let memory = store.snapshot?.memory.value else { return MetricPresentation.status(for: store.snapshot?.memory) }
-        return "已用 \(MetricFormatter.memory(memory.usedBytes)) / \(MetricFormatter.memory(memory.totalBytes))"
+        guard let memory = store.snapshot?.memory.value else {
+            return MetricPresentation.status(for: store.snapshot?.memory, historyDuration: store.settings.historyDuration)
+        }
+        return "已用 \(MetricFormatter.memory(memory.usedBytes)) / \(MetricFormatter.memory(memory.totalBytes)) · \(store.settings.historyDuration.recentLabel)"
     }
 
     private func networkStatus(_ bytes: Double?) -> String {
         guard store.snapshot?.network.value != nil else {
-            return MetricPresentation.status(for: store.snapshot?.network)
+            return MetricPresentation.status(for: store.snapshot?.network, historyDuration: store.settings.historyDuration)
         }
-        return bytes == nil ? "等待下一次采样" : "最近五分钟"
+        return bytes == nil ? "等待下一次采样" : store.settings.historyDuration.recentLabel
     }
 
     private var temperature: String {
@@ -123,7 +129,7 @@ struct DashboardView: View {
 
     private func thermalStatus(_ available: Bool) -> String {
         guard store.snapshot?.thermal.value != nil else {
-            return MetricPresentation.status(for: store.snapshot?.thermal)
+            return MetricPresentation.status(for: store.snapshot?.thermal, historyDuration: store.settings.historyDuration)
         }
         return available ? "" : "等待下一次采样"
     }

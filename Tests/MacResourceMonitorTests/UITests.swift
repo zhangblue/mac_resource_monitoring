@@ -122,7 +122,7 @@ final class UITests: XCTestCase {
             HistoryPoint(timestamp: start.addingTimeInterval(2), value: nil),
             HistoryPoint(timestamp: start.addingTimeInterval(3), value: 0.4)
         ]
-        XCTAssertEqual(SparklinePresentation(points: points).segments.map(\.count), [2, 1])
+        XCTAssertEqual(SparklinePresentation(points: points, historyDuration: .fiveMinutes, refreshInterval: .oneSecond).segments.map(\.count), [2, 1])
     }
 
     func testSparklineKeepsOnlyLatestFiveMinutes() {
@@ -131,8 +131,8 @@ final class UITests: XCTestCase {
             HistoryPoint(timestamp: start, value: 0.1),
             HistoryPoint(timestamp: start.addingTimeInterval(301), value: 0.2)
         ]
-        XCTAssertEqual(SparklinePresentation(points: points).segments.map(\.count), [1])
-        XCTAssertEqual(SparklinePresentation(points: points).segments[0][0].value, 0.2)
+        XCTAssertEqual(SparklinePresentation(points: points, historyDuration: .fiveMinutes, refreshInterval: .oneSecond).segments.map(\.count), [1])
+        XCTAssertEqual(SparklinePresentation(points: points, historyDuration: .fiveMinutes, refreshInterval: .oneSecond).segments[0][0].value, 0.2)
     }
 
     func testSparklineAxisIgnoresPeakOutsideVisibleWindow() throws {
@@ -140,7 +140,7 @@ final class UITests: XCTestCase {
         let presentation = SparklinePresentation(points: [
             HistoryPoint(timestamp: start, value: 1),
             HistoryPoint(timestamp: start.addingTimeInterval(301), value: 0.02)
-        ])
+        ], historyDuration: .fiveMinutes, refreshInterval: .oneSecond)
 
         XCTAssertEqual(presentation.visibleValues, [0.02])
         let axis = try XCTUnwrap(SparklineAxisPresentation(values: presentation.visibleValues, kind: .percentage))
@@ -156,7 +156,7 @@ final class UITests: XCTestCase {
             HistoryPoint(timestamp: start.addingTimeInterval(302), value: nil),
             HistoryPoint(timestamp: start.addingTimeInterval(303), value: .nan),
             HistoryPoint(timestamp: start.addingTimeInterval(304), value: 2048)
-        ])
+        ], historyDuration: .fiveMinutes, refreshInterval: .oneSecond)
 
         XCTAssertEqual(presentation.visibleValues, [1024, 2048])
         XCTAssertEqual(presentation.segments.map(\.count), [1, 1])
@@ -168,7 +168,7 @@ final class UITests: XCTestCase {
             HistoryPoint(timestamp: Date(timeIntervalSince1970: 699), value: 0.03),
             HistoryPoint(timestamp: Date(timeIntervalSince1970: 1000), value: 1),
             HistoryPoint(timestamp: Date(timeIntervalSince1970: 999), value: 0.02)
-        ])
+        ], historyDuration: .fiveMinutes, refreshInterval: .oneSecond)
 
         XCTAssertEqual(presentation.visibleValues, [0.03, 0.02])
         XCTAssertEqual(presentation.segments.map(\.count), [1, 1])
@@ -179,10 +179,53 @@ final class UITests: XCTestCase {
     }
 
     func testPresentationDistinguishesWaitingFromUnavailable() {
-        XCTAssertEqual(MetricPresentation.status(for: Optional<Reading<Double>>.none), "等待下一次采样")
-        XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.unavailable("等待 CPU 采样基线")), "等待下一次采样")
-        XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.unavailable("read failed")), "暂不可用")
-        XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.value(0.2)), "最近五分钟")
+        XCTAssertEqual(MetricPresentation.status(for: Optional<Reading<Double>>.none, historyDuration: .oneMinute), "等待下一次采样")
+        XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.unavailable("等待 CPU 采样基线"), historyDuration: .tenMinutes), "等待下一次采样")
+        XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.unavailable("read failed"), historyDuration: .oneMinute), "暂不可用")
+        XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.value(0.2), historyDuration: .fiveMinutes), "最近 5 分钟")
+    }
+
+    // Fixed 300-second clipping would retain the old peak and distort the axis.
+    func testSparklineUsesSelectedOneMinuteWindow() throws {
+        let start = Date(timeIntervalSince1970: 0)
+        let presentation = SparklinePresentation(points: [
+            .init(timestamp: start, value: 0.9),
+            .init(timestamp: start.addingTimeInterval(60), value: 0.02),
+            .init(timestamp: start.addingTimeInterval(61), value: 0.03)
+        ], historyDuration: .oneMinute, refreshInterval: .oneSecond)
+
+        XCTAssertEqual(presentation.visibleValues, [0.02, 0.03])
+        let axis = try XCTUnwrap(SparklineAxisPresentation(values: presentation.visibleValues, kind: .percentage))
+        XCTAssertEqual(axis.domain.upperBound, 0.10, accuracy: 0.000_001)
+        XCTAssertEqual(presentation.timeDomain.lowerBound, start.addingTimeInterval(1))
+        XCTAssertEqual(presentation.timeDomain.upperBound, start.addingTimeInterval(61))
+    }
+
+    func testSparklineUsesSelectedTenMinuteWindowIncludingBoundary() {
+        let presentation = SparklinePresentation(points: [
+            .init(timestamp: Date(timeIntervalSince1970: 0), value: 0.9),
+            .init(timestamp: Date(timeIntervalSince1970: 1), value: 0.2),
+            .init(timestamp: Date(timeIntervalSince1970: 601), value: 0.3)
+        ], historyDuration: .tenMinutes, refreshInterval: .fiveSeconds)
+
+        XCTAssertEqual(presentation.visibleValues, [0.2, 0.3])
+        XCTAssertEqual(presentation.timeDomain.lowerBound, Date(timeIntervalSince1970: 1))
+        XCTAssertEqual(presentation.timeDomain.upperBound, Date(timeIntervalSince1970: 601))
+    }
+
+    func testEmptySparklineHasValidSelectedTimeDomain() {
+        for duration in HistoryDuration.allCases {
+            let presentation = SparklinePresentation(points: [], historyDuration: duration, refreshInterval: .oneSecond)
+            XCTAssertTrue(presentation.segments.isEmpty)
+            XCTAssertLessThan(presentation.timeDomain.lowerBound, presentation.timeDomain.upperBound)
+            XCTAssertEqual(presentation.timeDomain.upperBound.timeIntervalSince(presentation.timeDomain.lowerBound),
+                           Double(duration.rawValue))
+        }
+    }
+
+    func testPresentationUsesSelectedDurationLabel() {
+        XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.value(0.2), historyDuration: .oneMinute), "最近 1 分钟")
+        XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.value(0.2), historyDuration: .tenMinutes), "最近 10 分钟")
     }
 
     func testDiskDisplaysOnlyCapacityFromFirstSample() {
