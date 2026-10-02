@@ -67,7 +67,7 @@ struct SparklinePresentation {
         let cutoff = end.addingTimeInterval(-TimeInterval(historyDuration.rawValue))
         timeDomain = cutoff...end
         let discontinuityThreshold = TimeInterval(refreshInterval.rawValue * 3)
-        for point in points where point.timestamp >= cutoff && point.timestamp <= end {
+        for point in points {
             // Allow up to three expected intervals of jitter, but split duplicate
             // and backward wall-clock timestamps as well as longer gaps.
             if let previous = current.last {
@@ -85,7 +85,11 @@ struct SparklinePresentation {
             }
         }
         if !current.isEmpty { segments.append(current) }
-        self.segments = segments
+        // Detect discontinuities before clipping: an excluded future sample can
+        // still establish a rollback into the visible window.
+        self.segments = segments.map { segment in
+            segment.filter { $0.timestamp >= cutoff && $0.timestamp <= end }
+        }.filter { !$0.isEmpty }
     }
 }
 

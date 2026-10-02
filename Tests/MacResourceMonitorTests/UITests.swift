@@ -185,6 +185,30 @@ final class UITests: XCTestCase {
         XCTAssertEqual(MetricPresentation.status(for: Reading<Double>.value(0.2), historyDuration: .fiveMinutes), "最近 5 分钟")
     }
 
+    // Filtering the future sample before checking raw adjacency hides the rollback.
+    func testShortClockRollbackSplitsEvenWhenFuturePointIsExcluded() throws {
+        let cases: [(RefreshInterval, [TimeInterval])] = [
+            (.oneSecond, [100, 103, 102]),
+            (.threeSeconds, [100, 109, 106]),
+            (.fiveSeconds, [100, 115, 110])
+        ]
+        for (interval, timestamps) in cases {
+            let points = zip(timestamps, [0.02, 1.0, 0.03]).map {
+                HistoryPoint(timestamp: Date(timeIntervalSince1970: $0.0), value: $0.1)
+            }
+            let presentation = SparklinePresentation(points: points, historyDuration: .oneMinute,
+                                                     refreshInterval: interval)
+
+            XCTAssertEqual(presentation.segments.map(\.count), [1, 1], "Interval: \(interval)")
+            XCTAssertEqual(presentation.visibleValues, [0.02, 0.03])
+            XCTAssertTrue(presentation.segments.flatMap { $0 }.allSatisfy {
+                presentation.timeDomain.contains($0.timestamp)
+            })
+            let axis = try XCTUnwrap(SparklineAxisPresentation(values: presentation.visibleValues, kind: .percentage))
+            XCTAssertEqual(axis.domain.upperBound, 0.10, accuracy: 0.000_001)
+        }
+    }
+
     // Fixed 300-second clipping would retain the old peak and distort the axis.
     func testSparklineUsesSelectedOneMinuteWindow() throws {
         let start = Date(timeIntervalSince1970: 0)
