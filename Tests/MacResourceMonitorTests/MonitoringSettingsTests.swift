@@ -48,4 +48,18 @@ final class MonitoringSettingsTests: XCTestCase {
         XCTAssertEqual(settings.refreshInterval, .oneSecond)
         XCTAssertEqual(settings.historyDuration, .fiveMinutes)
     }
+
+    func testNumericStringStoredValueFallsBackToDefaults() {
+        defaults.set("3", forKey: MonitoringSettings.refreshIntervalKey)
+        let settings = MonitoringSettings(defaults: defaults)
+        XCTAssertEqual(settings.refreshInterval, .oneSecond)
+        XCTAssertEqual(settings.historyDuration, .fiveMinutes)
+    }
+
+    func testFractionalStoredValueFallsBackToDefaults() {
+        defaults.set(3.9, forKey: MonitoringSettings.refreshIntervalKey)
+        let settings = MonitoringSettings(defaults: defaults)
+        XCTAssertEqual(settings.refreshInterval, .oneSecond)
+        XCTAssertEqual(settings.historyDuration, .fiveMinutes)
+    }
 }

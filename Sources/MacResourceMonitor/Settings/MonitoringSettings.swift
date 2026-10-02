@@ -1,4 +1,5 @@
 import Combine
+import CoreFoundation
 import Foundation
 
 enum RefreshInterval: Int, CaseIterable, Identifiable, Sendable {
@@ -41,8 +42,27 @@ final class MonitoringSettings: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        refreshInterval = RefreshInterval(rawValue: defaults.integer(forKey: Self.refreshIntervalKey)) ?? .oneSecond
-        historyDuration = HistoryDuration(rawValue: defaults.integer(forKey: Self.historyDurationKey)) ?? .fiveMinutes
+        refreshInterval = Self.storedInteger(forKey: Self.refreshIntervalKey, defaults: defaults)
+            .flatMap(RefreshInterval.init(rawValue:)) ?? .oneSecond
+        historyDuration = Self.storedInteger(forKey: Self.historyDurationKey, defaults: defaults)
+            .flatMap(HistoryDuration.init(rawValue:)) ?? .fiveMinutes
+    }
+
+    private static func storedInteger(forKey key: String, defaults: UserDefaults) -> Int? {
+        guard let value = defaults.object(forKey: key),
+              CFGetTypeID(value as CFTypeRef) == CFNumberGetTypeID(),
+              CFGetTypeID(value as CFTypeRef) != CFBooleanGetTypeID() else {
+            return nil
+        }
+
+        let number = value as! NSNumber
+        let type = String(cString: number.objCType)
+        guard ["c", "s", "i", "l", "q", "C", "S", "I", "L", "Q"].contains(type),
+              let integer = Int(number.stringValue),
+              number.compare(NSNumber(value: integer)) == .orderedSame else {
+            return nil
+        }
+        return integer
     }
 
     var configuration: MonitoringConfiguration {
