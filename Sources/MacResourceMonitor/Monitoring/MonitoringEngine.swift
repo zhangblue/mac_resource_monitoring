@@ -49,24 +49,34 @@ actor MonitoringEngine {
     private var previousCPU: CPUTicks?
     private var networkCalculator = NetworkRateCalculator()
     private var loop: Task<Void, Never>?
+    private var intervalWait: Task<Void, Never>?
+    private var intervalWaitID: UUID?
     private var generation = UUID()
     private var sampling: Task<MonitoringUpdate, Never>?
     private var samplingID: UUID?
     private var loggingTail: Task<Void, Never>?
     private var subscribers: [UUID: AsyncStream<MonitoringUpdate>.Continuation] = [:]
+    private(set) var configuration: MonitoringConfiguration
+    private var latestSnapshot: MetricSnapshot?
     private(set) var history: MetricHistory
 
     init(providers: ProviderSet = .live,
          logger: any DiagnosticLogging = DiagnosticLogger.live,
-         sleepMonitor: SystemSleepMonitor = SystemSleepMonitor()) {
+         sleepMonitor: SystemSleepMonitor = SystemSleepMonitor(),
+         configuration: MonitoringConfiguration = .init(
+            refreshInterval: .oneSecond, historyDuration: .fiveMinutes)) {
         self.providers = providers
         self.logger = logger
         self.sleepMonitor = sleepMonitor
-        history = MetricHistory()
+        self.configuration = configuration
+        history = MetricHistory(historyDuration: configuration.historyDuration)
     }
 
     deinit {
         loop?.cancel()
+        intervalWait?.cancel()
+        intervalWait = nil
+        intervalWaitID = nil
         sampling?.cancel()
         for continuation in subscribers.values { continuation.finish() }
     }
@@ -87,12 +97,14 @@ actor MonitoringEngine {
         loop = Task { [weak self] in
             let clock = ContinuousClock()
             while !Task.isCancelled {
-                // Cadence includes collection time; avoid an extra one-second delay.
-                let deadline = clock.now.advanced(by: .seconds(1))
+                // Cadence includes collection time and reads configuration after collection.
+                let cycleStart = clock.now
                 await self?.sampleAndPublish(generation: token)
-                guard !Task.isCancelled else { break }
-                do { try await clock.sleep(until: deadline) }
-                catch { break }
+                guard !Task.isCancelled,
+                      let wait = await self?.makeIntervalWait(startedAt: cycleStart, generation: token) else { break }
+                // Await outside the actor so an idle loop does not retain the engine.
+                await wait.task.value
+                await self?.clearIntervalWait(wait.id, generation: token)
             }
         }
     }
@@ -101,6 +113,9 @@ actor MonitoringEngine {
         generation = UUID()
         loop?.cancel()
         loop = nil
+        intervalWait?.cancel()
+        intervalWait = nil
+        intervalWaitID = nil
         sampling?.cancel()
         sampling = nil
         samplingID = nil
@@ -109,6 +124,38 @@ actor MonitoringEngine {
         let continuations = Array(subscribers.values)
         subscribers.removeAll()
         continuations.forEach { $0.finish() }
+    }
+
+    func updateConfiguration(_ newValue: MonitoringConfiguration) {
+        let intervalChanged = configuration.refreshInterval != newValue.refreshInterval
+        let historyChanged = configuration.historyDuration != newValue.historyDuration
+        configuration = newValue
+        if historyChanged {
+            history.updateDuration(newValue.historyDuration, endingAt: latestSnapshot?.timestamp)
+            if let latestSnapshot {
+                let update = MonitoringUpdate(snapshot: latestSnapshot, history: history)
+                subscribers.values.forEach { $0.yield(update) }
+            }
+        }
+        if intervalChanged { intervalWait?.cancel() }
+    }
+
+    private func makeIntervalWait(startedAt start: ContinuousClock.Instant, generation token: UUID)
+        -> (id: UUID, task: Task<Void, Never>)? {
+        guard generation == token, !Task.isCancelled else { return nil }
+        let deadline = start.advanced(by: .seconds(configuration.refreshInterval.rawValue))
+        let id = UUID()
+        let clock = ContinuousClock()
+        let wait = Task<Void, Never> { try? await clock.sleep(until: deadline) }
+        intervalWaitID = id
+        intervalWait = wait
+        return (id, wait)
+    }
+
+    private func clearIntervalWait(_ id: UUID, generation token: UUID) {
+        guard generation == token, intervalWaitID == id else { return }
+        intervalWait = nil
+        intervalWaitID = nil
     }
 
     func sample(at date: Date = Date()) async -> MetricSnapshot {
@@ -199,6 +246,7 @@ actor MonitoringEngine {
                                       memory: readings.1, network: networkMetric(readings.2, at: date),
                                       thermal: readings.4, disk: readings.3)
         history.append(snapshot)
+        latestSnapshot = snapshot
         enqueueDiagnostics(readings, at: date)
         return MonitoringUpdate(snapshot: snapshot, history: history)
     }

@@ -12,6 +12,26 @@ final class MonitoringEngineTests: XCTestCase {
         try await MonitoringChecks.failureIsolation()
     }
 
+    func testConfigurationUpdateTrimsAndPublishesWithoutRebuildingStream() async throws {
+        try await MonitoringChecks.configurationTrimsAndPublishes()
+    }
+
+    func testShorterRefreshIntervalCancelsOldWaitAndKeepsHistory() async throws {
+        try await MonitoringChecks.shorterIntervalWakesLoop()
+    }
+
+    func testConfigurationUpdatePreservesInFlightSampleAndCountsCollectionTime() async throws {
+        try await MonitoringChecks.configurationDuringCollection()
+    }
+
+    func testDeinitDuringIntervalWaitFinishesLiveStream() async throws {
+        try await MonitoringChecks.deinitDuringIntervalWait()
+    }
+
+    func testStopRestartDuringIntervalWaitDoesNotReviveOldLoop() async throws {
+        try await MonitoringChecks.restartDuringIntervalWait()
+    }
+
     // Fails if trimming excludes the lower boundary or retains points after clock rollback.
     func testHistoryUsesInclusiveTimeWindowAndRemovesFuturePointsAfterRollback() {
         var history = MetricHistory(historyDuration: .oneMinute)
@@ -186,6 +206,13 @@ private actor AdvancingCPUProvider: CPUProviding {
 private actor CompletionFlag {
     private(set) var completed = false
     func finish() { completed = true }
+}
+
+private actor UpdateRecorder {
+    private(set) var values: [MonitoringUpdate] = []
+    private(set) var finished = false
+    func append(_ update: MonitoringUpdate) { values.append(update) }
+    func finish() { finished = true }
 }
 
 private actor FailingDiagnosticLogger: DiagnosticLogging {
@@ -438,8 +465,143 @@ private enum MonitoringChecks {
                     disk: FakeDiskProvider(), sensors: sensors)
     }
 
-    static func makeEngine(providers: ProviderSet) -> MonitoringEngine {
-        MonitoringEngine(providers: providers, logger: SilentDiagnosticLogger())
+    static func makeEngine(providers: ProviderSet,
+                           configuration: MonitoringConfiguration = .init(
+                            refreshInterval: .oneSecond, historyDuration: .fiveMinutes)) -> MonitoringEngine {
+        MonitoringEngine(providers: providers, logger: SilentDiagnosticLogger(), configuration: configuration)
+    }
+
+    static func record(_ stream: AsyncStream<MonitoringUpdate>, in recorder: UpdateRecorder) -> Task<Void, Never> {
+        Task {
+            for await update in stream { await recorder.append(update) }
+            await recorder.finish()
+        }
+    }
+
+    // Removing immediate history publication must fail within two seconds, without awaiting forever.
+    static func configurationTrimsAndPublishes() async throws {
+        let engine = makeEngine(providers: providers(), configuration: .init(
+            refreshInterval: .fiveSeconds, historyDuration: .tenMinutes))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 0))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 600))
+        let recorder = UpdateRecorder()
+        let consumer = record(await engine.updates(), in: recorder)
+        await engine.updateConfiguration(.init(refreshInterval: .fiveSeconds, historyDuration: .oneMinute))
+        let published = await waitUntil { await recorder.values.count == 1 }
+        await engine.stop()
+        consumer.cancel()
+        await consumer.value
+        let update = await recorder.values.first
+        try require(published && update?.history.cpu.count == 1,
+                    "Existing stream receives immediately trimmed history")
+        try require(update?.snapshot.timestamp == Date(timeIntervalSince1970: 600),
+                    "History publication reuses the latest committed snapshot")
+    }
+
+    // Fails if interval changes cancel the loop, retain its old sleep, or reset history/baselines.
+    static func shorterIntervalWakesLoop() async throws {
+        let engine = makeEngine(providers: providers(cpu: AdvancingCPUProvider()), configuration: .init(
+            refreshInterval: .fiveSeconds, historyDuration: .fiveMinutes))
+        let recorder = UpdateRecorder()
+        let consumer = record(await engine.updates(), in: recorder)
+        await engine.start()
+        let firstArrived = await waitUntil { await recorder.values.count == 1 }
+        // Reach an existing wait and keep the next sample inside the network calculator's valid interval.
+        try await Task.sleep(for: .milliseconds(350))
+        let start = ContinuousClock.now
+        await engine.updateConfiguration(.init(refreshInterval: .oneSecond, historyDuration: .fiveMinutes))
+        let secondArrived = await waitUntil { await recorder.values.count >= 2 }
+        let elapsed = start.duration(to: ContinuousClock.now)
+        await engine.stop()
+        consumer.cancel()
+        await consumer.value
+        let values = await recorder.values
+        try require(firstArrived && secondArrived && elapsed < .seconds(2),
+                    "Shorter interval interrupts the five-second wait on the same stream")
+        try require(values.count >= 2 && values[1].history.cpu.count == values[0].history.cpu.count + 1,
+                    "Interval update preserves existing history")
+        try require(values[1].snapshot.cpuUsage.value == 0.3
+                    && values[1].snapshot.network.value?.downloadBytesPerSecond == 0,
+                    "Configuration changes preserve CPU and network baselines")
+    }
+
+    // Fails if reconfiguration cancels in-flight reads or adds a full interval after collection.
+    static func configurationDuringCollection() async throws {
+        let memory = GatedMemoryProvider()
+        let engine = makeEngine(providers: providers(memory: memory, cpu: AdvancingCPUProvider()),
+                                configuration: .init(refreshInterval: .fiveSeconds, historyDuration: .fiveMinutes))
+        let recorder = UpdateRecorder()
+        let consumer = record(await engine.updates(), in: recorder)
+        await engine.start()
+        let entered = await waitUntil { await memory.isSampling() }
+        await engine.updateConfiguration(.init(refreshInterval: .oneSecond, historyDuration: .oneMinute))
+        try await Task.sleep(for: .milliseconds(1_100))
+        let beforeRelease = await recorder.values.count
+        let releasedAt = ContinuousClock.now
+        await memory.release()
+        let nextArrived = await waitUntil { await recorder.values.count >= 2 }
+        let elapsed = releasedAt.duration(to: ContinuousClock.now)
+        await engine.stop()
+        consumer.cancel()
+        await consumer.value
+        let values = await recorder.values
+        try require(entered && beforeRelease == 0 && nextArrived,
+                    "In-flight sample completes before the next cycle publishes")
+        try require(elapsed < .milliseconds(700), "Collection time counts toward the new one-second period")
+        try require(values[0].snapshot.memory.value?.usage == 0.5
+                    && values[1].snapshot.cpuUsage.value == 0.3,
+                    "Reconfiguration preserves the in-flight result and its CPU baseline")
+        try require(values[1].history.historyDuration == .oneMinute && values[1].history.cpu.count == 2,
+                    "The next commit uses the updated history window")
+    }
+
+    // Fails if waiting retains the actor and prevents deinit from ending surviving subscriptions.
+    static func deinitDuringIntervalWait() async throws {
+        var engine: MonitoringEngine? = makeEngine(providers: providers(), configuration: .init(
+            refreshInterval: .fiveSeconds, historyDuration: .fiveMinutes))
+        weak var weakEngine = engine
+        let recorder = UpdateRecorder()
+        let consumer = record(await engine!.updates(), in: recorder)
+        await engine!.start()
+        let firstArrived = await waitUntil { await recorder.values.count == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        engine = nil
+        let ended = await waitUntil { await recorder.finished }
+        let released = weakEngine == nil
+        await weakEngine?.stop()
+        consumer.cancel()
+        await consumer.value
+        try require(firstArrived && ended && released, "Interval wait does not retain engine or its live stream")
+    }
+
+    // Fails if a cancelled old wait resumes its old loop or clears a restarted loop's wait.
+    static func restartDuringIntervalWait() async throws {
+        let engine = makeEngine(providers: providers(), configuration: .init(
+            refreshInterval: .fiveSeconds, historyDuration: .fiveMinutes))
+        let oldRecorder = UpdateRecorder()
+        let oldConsumer = record(await engine.updates(), in: oldRecorder)
+        await engine.start()
+        let firstArrived = await waitUntil { await oldRecorder.values.count == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        await engine.stop()
+        let recorder = UpdateRecorder()
+        let consumer = record(await engine.updates(), in: recorder)
+        await engine.start()
+        let restarted = await waitUntil { await recorder.values.count == 1 }
+        try await Task.sleep(for: .milliseconds(100))
+        await engine.updateConfiguration(.init(refreshInterval: .oneSecond, historyDuration: .fiveMinutes))
+        let woke = await waitUntil { await recorder.values.count >= 2 }
+        await engine.stop()
+        oldConsumer.cancel()
+        consumer.cancel()
+        await oldConsumer.value
+        await consumer.value
+        let oldValues = await oldRecorder.values
+        let values = await recorder.values
+        try require(firstArrived && restarted && woke && oldValues.count == 1,
+                    "Stop ends the old subscription and the new loop's wait remains cancellable")
+        try require(values.count >= 2 && values[0].history.cpu.count == 2 && values[1].history.cpu.count == 3,
+                    "Restart and wake each commit once without reviving an old loop")
     }
 
     // Fails if a thrown memory read cancels other providers, or nil temperature becomes unavailable.
