@@ -209,6 +209,69 @@ final class UITests: XCTestCase {
         }
     }
 
+    // Removing the future point must not erase the real history path's rollback boundary.
+    func testHistoryTrimmingPreservesRollbackForSparklineAndAxis() throws {
+        var history = MetricHistory(historyDuration: .oneMinute)
+        for (second, value) in [(100.0, 0.02), (109.0, 1.0), (106.0, 0.03)] {
+            history.append(MetricSnapshot(
+                timestamp: Date(timeIntervalSince1970: second), cpuUsage: .value(value),
+                memory: .value(MemoryMetric(usage: value, usedBytes: 2, totalBytes: 100)),
+                network: .value(NetworkMetric(downloadBytesPerSecond: value, uploadBytesPerSecond: value)),
+                thermal: .unavailable("not used"), disk: .unavailable("not used")
+            ))
+        }
+
+        for points in [history.cpu.elements, history.memory.elements,
+                       history.upload.elements, history.download.elements] {
+            XCTAssertEqual(points.map { $0.timestamp.timeIntervalSince1970 }, [100, 106])
+            let presentation = SparklinePresentation(points: points, historyDuration: .oneMinute,
+                                                     refreshInterval: .threeSeconds)
+            XCTAssertEqual(presentation.segments.map { $0.map { $0.timestamp.timeIntervalSince1970 } },
+                           [[100], [106]])
+            XCTAssertEqual(presentation.visibleValues, [0.02, 0.03])
+            let axis = try XCTUnwrap(SparklineAxisPresentation(values: presentation.visibleValues, kind: .percentage))
+            XCTAssertEqual(axis.domain.upperBound, 0.10, accuracy: 0.000_001)
+        }
+    }
+
+    // Trimming and missing values must preserve boundaries without splitting normal samples.
+    func testHistoryDiscontinuitiesSurviveUnavailableSamplesDuplicatesAndWindowTrimming() {
+        let cases: [(RefreshInterval, [TimeInterval], [Double?], [[TimeInterval]])] = [
+            (.oneSecond, [100, 103, 102], [0.02, 1, 0.03], [[100], [102]]),
+            (.fiveSeconds, [100, 115, 110], [0.02, 1, 0.03], [[100], [110]]),
+            (.threeSeconds, [100, 109, 106], [0.02, nil, 0.03], [[100], [106]]),
+            (.threeSeconds, [100, 109, 105, 106], [0.02, 1, nil, 0.03], [[100], [106]]),
+            (.threeSeconds, [100, 103, 103, 106], [0.02, 0.03, 0.04, 0.05], [[100, 103], [103, 106]]),
+            (.threeSeconds, [99, 100, 109, 106, 157, 160], [1, 0.02, 1, 0.03, 0.04, 0.05],
+             [[100], [106], [157, 160]]),
+            (.threeSeconds, [100, 103, 106], [0.02, 0.03, 0.04], [[100, 103, 106]])
+        ]
+        for (interval, timestamps, values, expected) in cases {
+            var history = MetricHistory(historyDuration: .oneMinute)
+            for (second, value) in zip(timestamps, values) {
+                history.append(MetricSnapshot(
+                    timestamp: Date(timeIntervalSince1970: second),
+                    cpuUsage: value.map(Reading.value) ?? .unavailable("missing"),
+                    memory: value.map { .value(MemoryMetric(usage: $0, usedBytes: 2, totalBytes: 100)) }
+                        ?? .unavailable("missing"),
+                    network: .value(NetworkMetric(downloadBytesPerSecond: value, uploadBytesPerSecond: value)),
+                    thermal: .unavailable("not used"), disk: .unavailable("not used")
+                ))
+            }
+            // Replacing the buffers for duration changes must retain existing boundaries.
+            let end = timestamps.last.map(Date.init(timeIntervalSince1970:))
+            history.updateDuration(.tenMinutes, endingAt: end)
+            history.updateDuration(.oneMinute, endingAt: end)
+            for points in [history.cpu.elements, history.memory.elements,
+                           history.upload.elements, history.download.elements] {
+                let presentation = SparklinePresentation(points: points, historyDuration: .oneMinute,
+                                                         refreshInterval: interval)
+                XCTAssertEqual(presentation.segments.map { $0.map { $0.timestamp.timeIntervalSince1970 } },
+                               expected, "Input timestamps: \(timestamps)")
+            }
+        }
+    }
+
     // Fixed 300-second clipping would retain the old peak and distort the axis.
     func testSparklineUsesSelectedOneMinuteWindow() throws {
         let start = Date(timeIntervalSince1970: 0)

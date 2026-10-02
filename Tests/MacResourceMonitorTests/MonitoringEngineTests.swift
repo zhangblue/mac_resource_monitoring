@@ -21,11 +21,23 @@ final class MonitoringEngineTests: XCTestCase {
     }
 
     func testDelayedPublicationKeepsSnapshotAndHistoryPairedAfterNewerCommit() async throws {
+        try await MonitoringChecks.intervalChangeBetweenCommitAndPublish()
+    }
+
+    func testDelayedPublicationCannotOverwriteLatestSnapshotAfterHistoryChange() async throws {
         try await MonitoringChecks.configurationBetweenCommitAndPublish(newerCommit: true)
+    }
+
+    func testShorteningThenExtendingRejectsDelayedHistoryRestoration() async throws {
+        try await MonitoringChecks.shorteningThenExtendingBeforePublication()
     }
 
     func testShorterRefreshIntervalCancelsOldWaitAndKeepsHistory() async throws {
         try await MonitoringChecks.shorterIntervalWakesLoop()
+    }
+
+    func testLongerRefreshIntervalPersistsAcrossCyclesAndKeepsHistoryAndBaselines() async throws {
+        try await MonitoringChecks.longerIntervalPersistsAcrossCycles()
     }
 
     func testConfigurationUpdatePreservesInFlightSampleAndCountsCollectionTime() async throws {
@@ -310,8 +322,9 @@ private actor GatedMemoryProvider: MemoryProviding {
 }
 
 private enum MonitoringChecks {
-    static func waitUntil(_ condition: @escaping @Sendable () async -> Bool) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+    static func waitUntil(timeout: Duration = .seconds(2),
+                          _ condition: @escaping @Sendable () async -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
         while ContinuousClock.now < deadline {
             if await condition() { return true }
             try? await Task.sleep(for: .milliseconds(10))
@@ -514,7 +527,7 @@ private enum MonitoringChecks {
         let committed = await engine.sample(at: Date(timeIntervalSince1970: 300))
         let delayed = MonitoringUpdate(snapshot: committed, history: await engine.history)
         try require(delayed.history.cpu.count == 2, "Committed update retains both points in the old window")
-        if newerCommit { _ = await engine.sample(at: Date(timeIntervalSince1970: 360)) }
+        let latest = newerCommit ? await engine.sample(at: Date(timeIntervalSince1970: 360)) : committed
         let stream = await engine.updates()
 
         // Deliberately order commit -> configuration publication -> delayed sample publication.
@@ -528,13 +541,69 @@ private enum MonitoringChecks {
         consumer.cancel()
         await consumer.value
         let update = await recorder.values.first
+        let expectedSeconds: [TimeInterval] = newerCommit ? [300, 360] : [300]
         try require(arrived && update?.history.historyDuration == .oneMinute
-                    && update?.history.cpu.elements.map(\.timestamp) == [Date(timeIntervalSince1970: 300)],
+                    && update?.history.cpu.elements.map { $0.timestamp.timeIntervalSince1970 } == expectedSeconds,
                     "Buffered delayed publication cannot restore history removed by the new configuration")
+        try require(update?.snapshot.timestamp == latest.timestamp
+                    && update?.snapshot.cpuUsage.value == latest.cpuUsage.value
+                    && update?.snapshot.disk.value?.usedBytes == latest.disk.value?.usedBytes,
+                    "Configuration history stays paired with the latest committed snapshot")
+    }
+
+    // Fails if a delayed copy can reintroduce points discarded during an intervening shorter window.
+    static func shorteningThenExtendingBeforePublication() async throws {
+        let engine = makeEngine(providers: providers(cpu: AdvancingCPUProvider()), configuration: .init(
+            refreshInterval: .fiveSeconds, historyDuration: .tenMinutes))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 0))
+        let committed = await engine.sample(at: Date(timeIntervalSince1970: 600))
+        let delayed = MonitoringUpdate(snapshot: committed, history: await engine.history)
+        try require(delayed.history.cpu.count == 2, "Delayed commit starts with both 0 and 600")
+        let stream = await engine.updates()
+
+        // Buffer all publications before consuming to make the overwrite order deterministic.
+        await engine.updateConfiguration(.init(refreshInterval: .fiveSeconds, historyDuration: .oneMinute))
+        await engine.updateConfiguration(.init(refreshInterval: .fiveSeconds, historyDuration: .tenMinutes))
+        await engine.publish(delayed)
+        let recorder = UpdateRecorder()
+        let consumer = record(stream, in: recorder)
+        let arrived = await waitUntil { await recorder.values.count == 1 }
+        await engine.stop()
+        consumer.cancel()
+        await consumer.value
+        let update = await recorder.values.first
+        let seconds = update?.history.cpu.elements.map { $0.timestamp.timeIntervalSince1970 }
+        try require(arrived && seconds == [600],
+                    "Shortening then extending must not restore 0 from the delayed commit; got \(String(describing: seconds))")
         try require(update?.snapshot.timestamp == committed.timestamp
-                    && update?.snapshot.cpuUsage.value == committed.cpuUsage.value
                     && update?.snapshot.disk.value?.usedBytes == committed.disk.value?.usedBytes,
-                    "History normalization preserves the original committed snapshot")
+                    "Configuration publication keeps the latest snapshot paired with its retained history")
+        try require(update?.history.historyDuration == .tenMinutes, "The chosen extended window remains active")
+    }
+
+    // Refresh-only changes must allow delayed snapshots and keep their own history, even after a newer commit.
+    static func intervalChangeBetweenCommitAndPublish() async throws {
+        let engine = makeEngine(providers: providers(cpu: AdvancingCPUProvider()), configuration: .init(
+            refreshInterval: .fiveSeconds, historyDuration: .fiveMinutes))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 0))
+        let committed = await engine.sample(at: Date(timeIntervalSince1970: 300))
+        let delayed = MonitoringUpdate(snapshot: committed, history: await engine.history)
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 360))
+        let stream = await engine.updates()
+        await engine.updateConfiguration(.init(refreshInterval: .oneSecond, historyDuration: .fiveMinutes))
+        await engine.publish(delayed)
+        let recorder = UpdateRecorder()
+        let consumer = record(stream, in: recorder)
+        let arrived = await waitUntil { await recorder.values.count == 1 }
+        await engine.stop()
+        consumer.cancel()
+        await consumer.value
+        let update = await recorder.values.first
+        try require(arrived && update?.snapshot.timestamp == committed.timestamp
+                    && update?.snapshot.disk.value?.usedBytes == committed.disk.value?.usedBytes,
+                    "A refresh-only change does not reject the delayed snapshot")
+        try require(update?.history.cpu.elements.map { $0.timestamp.timeIntervalSince1970 } == [0, 300],
+                    "Delayed snapshot retains its own history instead of the newer commit's history")
     }
 
     // Fails if interval changes cancel the loop, retain its old sleep, or reset history/baselines.
@@ -562,6 +631,37 @@ private enum MonitoringChecks {
         try require(values[1].snapshot.cpuUsage.value == 0.3
                     && values[1].snapshot.network.value?.downloadBytesPerSecond == 0,
                     "Configuration changes preserve CPU and network baselines")
+    }
+
+    // Fails if 1 -> 3 seconds affects only one wait or clears accumulated history/delta baselines.
+    static func longerIntervalPersistsAcrossCycles() async throws {
+        let engine = makeEngine(providers: providers(cpu: AdvancingCPUProvider()), configuration: .init(
+            refreshInterval: .oneSecond, historyDuration: .fiveMinutes))
+        let recorder = UpdateRecorder()
+        let consumer = record(await engine.updates(), in: recorder)
+        await engine.start()
+        let firstArrived = await waitUntil { await recorder.values.count == 1 }
+        try await Task.sleep(for: .milliseconds(350))
+        await engine.updateConfiguration(.init(refreshInterval: .threeSeconds, historyDuration: .fiveMinutes))
+        let changedCycleArrived = await waitUntil { await recorder.values.count >= 2 }
+        let followingCyclesArrived = await waitUntil(timeout: .seconds(8)) { await recorder.values.count >= 4 }
+        await engine.stop()
+        consumer.cancel()
+        await consumer.value
+        let values = await recorder.values
+        try require(firstArrived && changedCycleArrived && followingCyclesArrived && values.count >= 4,
+                    "Longer interval continues on the same stream within a bounded deadline")
+        let intervals = [values[2].snapshot.timestamp.timeIntervalSince(values[1].snapshot.timestamp),
+                         values[3].snapshot.timestamp.timeIntervalSince(values[2].snapshot.timestamp)]
+        try require(intervals.allSatisfy { $0 >= 2.7 && $0 < 4.5 },
+                    "Both cycles after the change must use three seconds; got \(intervals)")
+        try require(values.prefix(4).map { $0.history.cpu.count } == [1, 2, 3, 4],
+                    "Longer cadence preserves and grows existing history")
+        try require(values[1...3].allSatisfy {
+            $0.snapshot.cpuUsage.value == 0.3
+                && $0.snapshot.network.value?.downloadBytesPerSecond == 0
+                && $0.snapshot.network.value?.uploadBytesPerSecond == 0
+        }, "Longer cadence preserves CPU and both network baselines")
     }
 
     // Fails if reconfiguration cancels in-flight reads or adds a full interval after collection.

@@ -72,7 +72,7 @@ struct SparklinePresentation {
             // and backward wall-clock timestamps as well as longer gaps.
             if let previous = current.last {
                 let interval = point.timestamp.timeIntervalSince(previous.timestamp)
-                if interval <= 0 || interval > discontinuityThreshold {
+                if point.startsNewSegment || interval <= 0 || interval > discontinuityThreshold {
                     segments.append(current)
                     current = []
                 }

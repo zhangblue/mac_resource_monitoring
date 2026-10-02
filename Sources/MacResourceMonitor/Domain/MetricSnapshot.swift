@@ -56,4 +56,11 @@ struct HistoryPoint: Identifiable, Sendable {
     let id = UUID()
     let timestamp: Date
     let value: Double?
+    let startsNewSegment: Bool
+
+    init(timestamp: Date, value: Double?, startsNewSegment: Bool = false) {
+        self.timestamp = timestamp
+        self.value = value
+        self.startsNewSegment = startsNewSegment
+    }
 }

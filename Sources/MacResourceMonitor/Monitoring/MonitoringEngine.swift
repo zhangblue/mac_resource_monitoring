@@ -3,6 +3,7 @@ import Foundation
 struct MetricHistory: Sendable {
     private static let maximumPointCount = 600
     private(set) var historyDuration: HistoryDuration
+    private(set) var durationRevision = UUID()
     var cpu = RingBuffer<HistoryPoint>(capacity: maximumPointCount)
     var memory = RingBuffer<HistoryPoint>(capacity: maximumPointCount)
     var upload = RingBuffer<HistoryPoint>(capacity: maximumPointCount)
@@ -14,14 +15,21 @@ struct MetricHistory: Sendable {
 
     mutating func append(_ snapshot: MetricSnapshot) {
         let date = snapshot.timestamp
-        cpu.append(HistoryPoint(timestamp: date, value: snapshot.cpuUsage.value))
-        memory.append(HistoryPoint(timestamp: date, value: snapshot.memory.value?.usage))
-        upload.append(HistoryPoint(timestamp: date, value: snapshot.network.value?.uploadBytesPerSecond))
-        download.append(HistoryPoint(timestamp: date, value: snapshot.network.value?.downloadBytesPerSecond))
+        // Record clock discontinuity before trimming can remove the preceding future sample.
+        let startsNewSegment = cpu.elements.last.map { date <= $0.timestamp } ?? false
+        cpu.append(HistoryPoint(timestamp: date, value: snapshot.cpuUsage.value,
+                                startsNewSegment: startsNewSegment))
+        memory.append(HistoryPoint(timestamp: date, value: snapshot.memory.value?.usage,
+                                   startsNewSegment: startsNewSegment))
+        upload.append(HistoryPoint(timestamp: date, value: snapshot.network.value?.uploadBytesPerSecond,
+                                   startsNewSegment: startsNewSegment))
+        download.append(HistoryPoint(timestamp: date, value: snapshot.network.value?.downloadBytesPerSecond,
+                                     startsNewSegment: startsNewSegment))
         trim(endingAt: date)
     }
 
     mutating func updateDuration(_ duration: HistoryDuration, endingAt end: Date?) {
+        if historyDuration != duration { durationRevision = UUID() }
         historyDuration = duration
         if let end { trim(endingAt: end) }
     }
@@ -197,12 +205,11 @@ actor MonitoringEngine {
     }
 
     func publish(_ update: MonitoringUpdate) {
-        // Configuration may change after commit while the caller resumes from its await.
-        // Keep this history paired with its own snapshot, even if another sample has committed.
-        var history = update.history
-        history.updateDuration(configuration.historyDuration, endingAt: update.snapshot.timestamp)
-        let currentUpdate = MonitoringUpdate(snapshot: update.snapshot, history: history)
-        for continuation in subscribers.values { continuation.yield(currentUpdate) }
+        // Duration changes already publish the latest snapshot with the retained history.
+        // Reject older copies even after a shorten/extend round trip; refresh-only changes remain valid.
+        guard update.history.durationRevision == history.durationRevision else { return }
+        // A valid delayed update still owns its original snapshot/history pair.
+        for continuation in subscribers.values { continuation.yield(update) }
     }
 
     private func isCurrent(_ token: UUID) -> Bool { generation == token }
