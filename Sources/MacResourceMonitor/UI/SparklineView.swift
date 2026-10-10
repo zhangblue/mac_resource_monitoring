@@ -36,14 +36,14 @@ struct SparklineView: View {
     let emptyMessage: String
     let historyDuration: HistoryDuration
     let refreshInterval: RefreshInterval
-    @State private var hoverTarget: Date?
+    @State private var hoverPosition: SparklineHoverPosition?
 
     var body: some View {
         let presentation = SparklinePresentation(points: points, historyDuration: historyDuration,
                                                  refreshInterval: refreshInterval)
         let hoverPoints = presentation.segments.flatMap { $0 }
-        let hoverSelection = hoverTarget.flatMap {
-            SparklineHoverSelection(nearestTo: $0, points: hoverPoints)
+        let hoverSelection = hoverPosition.flatMap {
+            SparklineHoverSelection(nearestTo: $0.timestamp(in: presentation.timeDomain), points: hoverPoints)
         }
         let segments = presentation.segments
         let axis = SparklineAxisPresentation(values: presentation.visibleValues, kind: style.axisKind)
@@ -114,49 +114,34 @@ struct SparklineView: View {
                                 .onContinuousHover { phase in
                                     switch phase {
                                     case let .active(location):
-                                        guard plotFrame.contains(location),
-                                              let target = proxy.value(
-                                                  atX: location.x - plotFrame.minX,
-                                                  as: Date.self
-                                              ) else {
-                                            hoverTarget = nil
-                                            return
-                                        }
-                                        hoverTarget = target
+                                        hoverPosition = SparklineHoverPosition(location: location, plotFrame: plotFrame)
                                     case .ended:
-                                        hoverTarget = nil
+                                        hoverPosition = nil
                                     }
                                 }
 
                             if let hoverSelection,
                                let pointX = proxy.position(forX: hoverSelection.timestamp),
                                let pointY = proxy.position(forY: hoverSelection.value) {
+                                let tooltipLayout = SparklineHoverTooltipLayout(
+                                    pointX: plotFrame.minX + pointX, plotFrame: plotFrame
+                                )
                                 hoverTooltip(for: hoverSelection, referenceDate: presentation.timeDomain.upperBound)
-                                    .frame(width: 108, alignment: .leading)
+                                    .frame(width: tooltipLayout.width, alignment: .leading)
                                     .position(
-                                        x: tooltipX(pointX: plotFrame.minX + pointX, plotFrame: plotFrame),
+                                        x: tooltipLayout.centerX,
                                         y: max(plotFrame.minY + 18, plotFrame.minY + pointY - 22)
                                     )
                             }
                         }
                     }
                 }
-                .onChange(of: historyDuration) { _ in hoverTarget = nil }
-                .onChange(of: refreshInterval) { _ in hoverTarget = nil }
+                .onChange(of: historyDuration) { _ in hoverPosition = nil }
+                .onChange(of: refreshInterval) { _ in hoverPosition = nil }
                 .accessibilityLabel("\(style.name)\(historyDuration.recentLabel)趋势，纵轴范围 \(axis.labels[0]) 至 \(axis.labels[2])")
             }
         }
         .frame(height: 64)
-    }
-
-    private let tooltipWidth: CGFloat = 108
-
-    private func tooltipX(pointX: CGFloat, plotFrame: CGRect) -> CGFloat {
-        let halfWidth = tooltipWidth / 2
-        let proposed = pointX <= plotFrame.midX
-            ? pointX + halfWidth + 8
-            : pointX - halfWidth - 8
-        return min(max(proposed, plotFrame.minX + halfWidth), plotFrame.maxX - halfWidth)
     }
 
     private func hoverTooltip(for selection: SparklineHoverSelection, referenceDate: Date) -> some View {
