@@ -37,13 +37,16 @@ struct SparklineView: View {
     let historyDuration: HistoryDuration
     let refreshInterval: RefreshInterval
     @State private var hoverPosition: SparklineHoverPosition?
+    @State private var hoverPlotFrame: CGRect = .zero
 
     var body: some View {
         let presentation = SparklinePresentation(points: points, historyDuration: historyDuration,
                                                  refreshInterval: refreshInterval)
         let hoverPoints = presentation.segments.flatMap { $0 }
         let hoverSelection = hoverPosition.flatMap {
-            SparklineHoverSelection(nearestTo: $0.timestamp(in: presentation.timeDomain), points: hoverPoints)
+            $0.timestamp(in: presentation.timeDomain, plotFrame: hoverPlotFrame)
+        }.flatMap {
+            SparklineHoverSelection(nearestTo: $0, points: hoverPoints)
         }
         let segments = presentation.segments
         let axis = SparklineAxisPresentation(values: presentation.visibleValues, kind: style.axisKind)
@@ -107,6 +110,11 @@ struct SparklineView: View {
                 .chartOverlay { proxy in
                     GeometryReader { geometry in
                         let plotFrame = geometry[proxy.plotAreaFrame]
+                        let overlaySelection = hoverPosition.flatMap {
+                            $0.timestamp(in: presentation.timeDomain, plotFrame: plotFrame)
+                        }.flatMap {
+                            SparklineHoverSelection(nearestTo: $0, points: hoverPoints)
+                        }
                         ZStack(alignment: .topLeading) {
                             Rectangle()
                                 .fill(.clear)
@@ -114,19 +122,20 @@ struct SparklineView: View {
                                 .onContinuousHover { phase in
                                     switch phase {
                                     case let .active(location):
-                                        hoverPosition = SparklineHoverPosition(location: location, plotFrame: plotFrame)
+                                        hoverPlotFrame = plotFrame
+                                        hoverPosition = SparklineHoverPosition(location: location)
                                     case .ended:
                                         hoverPosition = nil
                                     }
                                 }
 
-                            if let hoverSelection,
-                               let pointX = proxy.position(forX: hoverSelection.timestamp),
-                               let pointY = proxy.position(forY: hoverSelection.value) {
+                            if let overlaySelection,
+                               let pointX = proxy.position(forX: overlaySelection.timestamp),
+                               let pointY = proxy.position(forY: overlaySelection.value) {
                                 let tooltipLayout = SparklineHoverTooltipLayout(
                                     pointX: plotFrame.minX + pointX, plotFrame: plotFrame
                                 )
-                                hoverTooltip(for: hoverSelection, referenceDate: presentation.timeDomain.upperBound)
+                                hoverTooltip(for: overlaySelection, referenceDate: presentation.timeDomain.upperBound)
                                     .frame(width: tooltipLayout.width, alignment: .leading)
                                     .position(
                                         x: tooltipLayout.centerX,
@@ -134,6 +143,8 @@ struct SparklineView: View {
                                     )
                             }
                         }
+                        .onAppear { hoverPlotFrame = plotFrame }
+                        .onChange(of: plotFrame) { hoverPlotFrame = $0 }
                     }
                 }
                 .onChange(of: historyDuration) { _ in hoverPosition = nil }

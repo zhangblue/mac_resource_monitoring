@@ -1,15 +1,16 @@
 import Foundation
 
 struct SparklineHoverPosition {
-    private let fraction: Double
+    private let location: CGPoint
 
-    init?(location: CGPoint, plotFrame: CGRect) {
-        guard plotFrame.width > 0, plotFrame.contains(location) else { return nil }
-        fraction = Double((location.x - plotFrame.minX) / plotFrame.width)
+    init(location: CGPoint) {
+        self.location = location
     }
 
-    func timestamp(in timeDomain: ClosedRange<Date>) -> Date {
-        timeDomain.lowerBound.addingTimeInterval(
+    func timestamp(in timeDomain: ClosedRange<Date>, plotFrame: CGRect) -> Date? {
+        guard plotFrame.width > 0, plotFrame.contains(location) else { return nil }
+        let fraction = Double((location.x - plotFrame.minX) / plotFrame.width)
+        return timeDomain.lowerBound.addingTimeInterval(
             timeDomain.upperBound.timeIntervalSince(timeDomain.lowerBound) * fraction
         )
     }

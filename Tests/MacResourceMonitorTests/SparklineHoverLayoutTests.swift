@@ -2,11 +2,28 @@ import XCTest
 @testable import MacResourceMonitor
 
 final class SparklineHoverLayoutTests: XCTestCase {
+    func testStationaryHoverRemapsWhenPlotOriginAndWidthChange() throws {
+        let originalFrame = CGRect(x: 20, y: 0, width: 124, height: 64)
+        let position = SparklineHoverPosition(location: CGPoint(x: 110, y: 30))
+        let domain = Date(timeIntervalSince1970: 101)...Date(timeIntervalSince1970: 161)
+        let changedFrame = CGRect(x: 52, y: 0, width: 92, height: 64)
+
+        XCTAssertEqual(try XCTUnwrap(position.timestamp(in: domain, plotFrame: originalFrame))
+            .timeIntervalSince1970, 144.548387, accuracy: 0.000001)
+        XCTAssertEqual(try XCTUnwrap(position.timestamp(in: domain, plotFrame: changedFrame))
+            .timeIntervalSince1970, 138.826087, accuracy: 0.000001)
+    }
+
+    func testStationaryHoverHasNoTargetWhenChangedPlotExcludesPointer() throws {
+        let position = SparklineHoverPosition(location: CGPoint(x: 50, y: 30))
+        let domain = Date(timeIntervalSince1970: 101)...Date(timeIntervalSince1970: 161)
+        XCTAssertNil(position.timestamp(in: domain, plotFrame: CGRect(x: 52, y: 0, width: 92, height: 64)))
+        XCTAssertNil(position.timestamp(in: domain, plotFrame: CGRect(x: 20, y: 32, width: 124, height: 32)))
+    }
+
     func testStationaryHoverMapsIntoLatestTimeDomainAndSelectsNewSample() throws {
-        let position = try XCTUnwrap(SparklineHoverPosition(
-            location: CGPoint(x: 200, y: 30),
-            plotFrame: CGRect(x: 20, y: 0, width: 200, height: 64)
-        ))
+        let position = SparklineHoverPosition(location: CGPoint(x: 200, y: 30))
+        let plotFrame = CGRect(x: 20, y: 0, width: 200, height: 64)
         let oldDomain = Date(timeIntervalSince1970: 100)...Date(timeIntervalSince1970: 160)
         let newDomain = Date(timeIntervalSince1970: 101)...Date(timeIntervalSince1970: 161)
         let points = [
@@ -14,29 +31,31 @@ final class SparklineHoverLayoutTests: XCTestCase {
             HistoryPoint(timestamp: Date(timeIntervalSince1970: 155), value: 0.8)
         ]
 
-        XCTAssertEqual(position.timestamp(in: oldDomain), Date(timeIntervalSince1970: 154))
-        XCTAssertEqual(position.timestamp(in: newDomain), Date(timeIntervalSince1970: 155))
+        XCTAssertEqual(position.timestamp(in: oldDomain, plotFrame: plotFrame), Date(timeIntervalSince1970: 154))
+        let newTarget = try XCTUnwrap(position.timestamp(in: newDomain, plotFrame: plotFrame))
+        XCTAssertEqual(newTarget, Date(timeIntervalSince1970: 155))
         XCTAssertEqual(
-            SparklineHoverSelection(nearestTo: position.timestamp(in: newDomain), points: points)?.value,
+            SparklineHoverSelection(nearestTo: newTarget, points: points)?.value,
             0.8
         )
     }
 
-    func testHoverMappingUsesNormalizedPositionAcrossDomainLengths() throws {
-        let position = try XCTUnwrap(SparklineHoverPosition(
-            location: CGPoint(x: 110, y: 30),
-            plotFrame: CGRect(x: 20, y: 0, width: 100, height: 64)
-        ))
+    func testHoverMappingUsesCurrentPlotPositionAcrossDomainLengths() {
+        let position = SparklineHoverPosition(location: CGPoint(x: 110, y: 30))
+        let plotFrame = CGRect(x: 20, y: 0, width: 100, height: 64)
         let domain = Date(timeIntervalSince1970: 100)...Date(timeIntervalSince1970: 220)
-        XCTAssertEqual(position.timestamp(in: domain), Date(timeIntervalSince1970: 208))
+        XCTAssertEqual(position.timestamp(in: domain, plotFrame: plotFrame), Date(timeIntervalSince1970: 208))
     }
 
-    func testHoverOutsidePlotOrZeroWidthHasNoPosition() {
+    func testHoverOutsidePlotOrZeroWidthHasNoTarget() {
         let plotFrame = CGRect(x: 20, y: 5, width: 100, height: 60)
-        XCTAssertNil(SparklineHoverPosition(location: CGPoint(x: 19, y: 30), plotFrame: plotFrame))
-        XCTAssertNil(SparklineHoverPosition(location: CGPoint(x: 50, y: 4), plotFrame: plotFrame))
-        XCTAssertNil(SparklineHoverPosition(location: CGPoint(x: 20, y: 30),
-                                           plotFrame: CGRect(x: 20, y: 0, width: 0, height: 64)))
+        let domain = Date(timeIntervalSince1970: 100)...Date(timeIntervalSince1970: 160)
+        XCTAssertNil(SparklineHoverPosition(location: CGPoint(x: 19, y: 30))
+            .timestamp(in: domain, plotFrame: plotFrame))
+        XCTAssertNil(SparklineHoverPosition(location: CGPoint(x: 50, y: 4))
+            .timestamp(in: domain, plotFrame: plotFrame))
+        XCTAssertNil(SparklineHoverPosition(location: CGPoint(x: 20, y: 30))
+            .timestamp(in: domain, plotFrame: CGRect(x: 20, y: 0, width: 0, height: 64)))
     }
 
     func testNarrowTooltipFitsInsidePlotWithoutCoveringYAxis() {
