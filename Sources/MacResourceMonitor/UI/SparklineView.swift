@@ -1,3 +1,4 @@
+import AppKit
 import Charts
 import SwiftUI
 
@@ -50,9 +51,10 @@ struct SparklineView: View {
         }
         let segments = presentation.segments
         let axis = SparklineAxisPresentation(values: presentation.visibleValues, kind: style.axisKind)
+        let isEmpty = segments.isEmpty || axis == nil
 
         Group {
-            if segments.isEmpty || axis == nil {
+            if isEmpty {
                 HStack(spacing: 6) {
                     Text("—")
                     Text(emptyMessage)
@@ -141,18 +143,27 @@ struct SparklineView: View {
                                         x: tooltipLayout.centerX,
                                         y: max(plotFrame.minY + 18, plotFrame.minY + pointY - 22)
                                     )
+                                    .allowsHitTesting(false)
                             }
                         }
                         .onAppear { hoverPlotFrame = plotFrame }
                         .onChange(of: plotFrame) { hoverPlotFrame = $0 }
                     }
                 }
+                .background(SparklineWindowFocusObserver { hoverPosition = nil })
                 .onChange(of: historyDuration) { _ in hoverPosition = nil }
                 .onChange(of: refreshInterval) { _ in hoverPosition = nil }
                 .accessibilityLabel("\(style.name)\(historyDuration.recentLabel)趋势，纵轴范围 \(axis.labels[0]) 至 \(axis.labels[2])")
             }
         }
         .frame(height: 64)
+        .onDisappear { hoverPosition = nil }
+        .onChange(of: isEmpty) { empty in
+            if empty { hoverPosition = nil }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in
+            hoverPosition = nil
+        }
     }
 
     private func hoverTooltip(for selection: SparklineHoverSelection, referenceDate: Date) -> some View {
@@ -168,5 +179,49 @@ struct SparklineView: View {
         .padding(.vertical, 4)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct SparklineWindowFocusObserver: NSViewRepresentable {
+    let onFocusLost: () -> Void
+
+    func makeNSView(context: Context) -> FocusObservationView {
+        let view = FocusObservationView(frame: .zero)
+        view.onFocusLost = onFocusLost
+        return view
+    }
+
+    func updateNSView(_ nsView: FocusObservationView, context: Context) {
+        nsView.onFocusLost = onFocusLost
+    }
+
+    static func dismantleNSView(_ nsView: FocusObservationView, coordinator: ()) {
+        nsView.stopObserving()
+        nsView.onFocusLost = nil
+    }
+
+    final class FocusObservationView: NSView {
+        var onFocusLost: (() -> Void)?
+        private var observers: [NSObjectProtocol] = []
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            stopObserving()
+            guard let window else { return }
+            observers = [NSWindow.didResignKeyNotification, NSWindow.willCloseNotification].map { name in
+                NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    self?.onFocusLost?()
+                }
+            }
+        }
+
+        func stopObserving() {
+            observers.forEach(NotificationCenter.default.removeObserver)
+            observers.removeAll()
+        }
+
+        deinit {
+            observers.forEach(NotificationCenter.default.removeObserver)
+        }
     }
 }
