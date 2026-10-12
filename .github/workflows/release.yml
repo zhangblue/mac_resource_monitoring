@@ -1,0 +1,49 @@
+name: Release macOS DMG
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build application
+        run: bash scripts/build-app.sh
+
+      - name: Build DMG
+        run: bash scripts/build-dmg.sh
+
+      - name: Verify release
+        run: bash scripts/verify-release.sh
+
+      - name: Generate checksum
+        run: |
+          shasum -a 256 dist/MacResourceMonitor.dmg \
+            > dist/MacResourceMonitor.dmg.sha256
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            dist/MacResourceMonitor.dmg \
+            dist/MacResourceMonitor.dmg.sha256 \
+            --verify-tag \
+            --generate-notes \
+            --title "Mac Resource Monitor $GITHUB_REF_NAME"
