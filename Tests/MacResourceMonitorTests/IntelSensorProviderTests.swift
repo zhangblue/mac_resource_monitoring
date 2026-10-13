@@ -38,6 +38,30 @@ final class IntelSensorProviderTests: XCTestCase {
         XCTAssertEqual(stopped.fan.value, .rpm(0))
     }
 
+    func testFanCountRequiresExactPayloadLengthEvenWhenDecodedValueIsZero() {
+        for (type, bytes): (String, [UInt8]) in [
+            ("ui8 ", [0, 1]), ("ui16", [0, 0, 1]), ("ui32", [0, 0, 0, 0, 1])
+        ] {
+            let metric = IntelSensorProvider(transport: Transport(values: [
+                "TC0P": hot, "FNum": SMCValue(type: type, bytes: bytes)
+            ])).sample()
+            XCTAssertTrue(metric.fan.isUnavailable, "\(type) with \(bytes.count) bytes must not be fanless")
+            XCTAssertEqual(metric.temperature.value, 54.5)
+        }
+    }
+
+    func testIntelFanRejectsNonRPMEncodingsWithoutHidingTemperature() {
+        for reading in [hot, SMCValue(type: "ui8 ", bytes: [54]),
+                        SMCValue(type: "ui16", bytes: [0, 54]),
+                        SMCValue(type: "ui32", bytes: [0, 0, 0, 54])] {
+            let metric = IntelSensorProvider(transport: Transport(values: [
+                "TC0P": hot, "FNum": SMCValue(type: "ui8 ", bytes: [1]), "F0Ac": reading
+            ])).sample()
+            XCTAssertTrue(metric.fan.isUnavailable, "\(reading.type) is not a trusted RPM encoding")
+            XCTAssertEqual(metric.temperature.value, 54.5)
+        }
+    }
+
     func testCandidatesFailClosedAndSecondCandidateFallback() throws {
         for bad in [SMCValue(type: "sp78", bytes: [0x09, 0]),
                     SMCValue(type: "sp78", bytes: [0x7D, 0x01]),

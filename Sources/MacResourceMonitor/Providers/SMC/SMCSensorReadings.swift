@@ -3,7 +3,14 @@ import Foundation
 enum SMCSensorReadings {
     static func fan(from transport: any SMCTransport, allowFloat: Bool = true) throws -> FanMetric {
         let countReading = try transport.read("FNum")
-        guard ["ui8 ", "ui16", "ui32"].contains(countReading.type) else {
+        let countLength: Int
+        switch countReading.type {
+        case "ui8 ": countLength = 1
+        case "ui16": countLength = 2
+        case "ui32": countLength = 4
+        default: throw SMCError.invalidFanCount
+        }
+        guard countReading.bytes.count == countLength else {
             throw SMCError.invalidFanCount
         }
         let count = try countReading.decoded()
@@ -15,7 +22,11 @@ enum SMCSensorReadings {
         for index in 0..<Int(count) {
             let key = "F\(index)Ac"
             let reading = try transport.read(key)
-            guard allowFloat || reading.type != "flt " else { throw SMCError.unsupportedType(reading.type) }
+            // fpe2 is the supported RPM interpretation; Intel float byte order
+            // is unverified, so only the Apple Silicon path may decode floats.
+            guard reading.type == "fpe2" || (allowFloat && reading.type == "flt ") else {
+                throw SMCError.unsupportedType(reading.type)
+            }
             let speed = try reading.decoded()
             guard speed.isFinite, speed >= 0 else { throw SMCError.invalidFanSpeed(key) }
             maximum = max(maximum, speed)
