@@ -18,6 +18,24 @@ final class SMCDecoderTests: XCTestCase {
         XCTAssertEqual(try SMCDecoder.decode(bytes: [0, 0, 0x5A, 0x42], type: "flt "), 54.5)
     }
 
+    func testRejectsOverlongTypedPayloadsRatherThanDecodingPrefixes() {
+        for (type, bytes): (String, [UInt8]) in [
+            ("sp78", [0x36, 0x80, 0]), ("fpe2", [0x1C, 0x70, 0]),
+            ("flt ", [0, 0, 0x5A, 0x42, 0]), ("ui8 ", [0, 0]),
+            ("ui16", [0, 0, 0]), ("ui32", [0, 0, 0, 0, 0])
+        ] {
+            XCTAssertThrowsError(try SMCDecoder.decode(bytes: bytes, type: type), "\(type)")
+        }
+    }
+
+    func testAppleSiliconFiniteFloatFanSpeedIsAccepted() throws {
+        let metric = try AppleSiliconSensorProvider(transport: FakeSMC(values: [
+            "FNum": SMCValue(type: "ui8 ", bytes: [1]),
+            "F0Ac": SMCValue(type: "flt ", bytes: [0, 0x80, 0xE3, 0x44])
+        ])).sample()
+        XCTAssertEqual(metric.fan.value, .rpm(1820))
+    }
+
     func testRejectsShortValuesAndUnknownTypes() {
         for (type, bytes) in [("sp78", [UInt8](repeating: 0, count: 1)), ("fpe2", [0]),
                               ("flt ", [0, 0, 0]), ("ui8 ", []), ("ui16", [0]), ("ui32", [0, 0, 0])] {

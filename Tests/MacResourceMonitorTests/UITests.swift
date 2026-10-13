@@ -114,6 +114,17 @@ final class UITests: XCTestCase {
         XCTAssertEqual(MenuBarPresentation(snapshot: snapshot).text, "C —   M 61%   ↑ —   ↓ —")
     }
 
+    func testMenuBarSnapshotIgnoresThermalAndDisk() {
+        let snapshot = MetricSnapshot(
+            timestamp: Date(), cpuUsage: .value(0.24),
+            memory: .value(MemoryMetric(usage: 0.61, usedBytes: 61, totalBytes: 100)),
+            network: .value(NetworkMetric(downloadBytesPerSecond: 8_400_000,
+                                          uploadBytesPerSecond: 1_200_000)),
+            thermal: .value(ThermalMetric(temperature: .value(54), fan: .value(.rpm(1820)))),
+            disk: .value(DiskMetric(usedBytes: 25, totalBytes: 100)))
+        XCTAssertEqual(MenuBarPresentation(snapshot: snapshot).text, "C 24%   M 61%   ↑ 1.2M   ↓ 8.4M")
+    }
+
     func testSparklineMissingPointBreaksLine() {
         let start = Date(timeIntervalSince1970: 0)
         let points = [
@@ -368,6 +379,22 @@ final class UITests: XCTestCase {
         XCTAssertEqual(MetricPresentation.fanText(for: disconnected), "—")
         XCTAssertEqual(MetricPresentation.temperatureStatus(for: disconnected), "暂不可用")
         XCTAssertEqual(MetricPresentation.fanStatus(for: disconnected), "暂不可用")
+    }
+
+    func testInjectedOutOfRangeTemperatureNeverLooksCredible() {
+        for temperature in [0.0, 9.9, 125.1, 126, .nan, .infinity] {
+            let reading: Reading<ThermalMetric> = .value(.init(
+                temperature: .value(temperature), fan: .value(.rpm(1820))))
+            XCTAssertEqual(MetricPresentation.temperatureText(for: reading), "—")
+            XCTAssertEqual(MetricPresentation.temperatureStatus(for: reading), "暂不可用")
+            XCTAssertEqual(MetricPresentation.fanText(for: reading), "1820 RPM")
+        }
+        for temperature in [10.0, 125.0] {
+            let reading: Reading<ThermalMetric> = .value(.init(
+                temperature: .value(temperature), fan: .unavailable("missing")))
+            XCTAssertEqual(MetricPresentation.temperatureStatus(for: reading), "")
+            XCTAssertNotEqual(MetricPresentation.temperatureText(for: reading), "—")
+        }
     }
 }
 

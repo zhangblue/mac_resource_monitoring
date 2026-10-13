@@ -98,14 +98,19 @@ private enum BoundaryChecks {
         let base = Date(timeIntervalSince1970: 1_000)
         _ = await engine.sample(at: base)
         let active = await engine.sample(at: base.addingTimeInterval(1))
+        try checkBoundary(active.cpuUsage.value == 0.3, "Adjacent CPU delta must be measured")
         try checkBoundary(active.network.value?.downloadBytesPerSecond == 100, "Adjacent rate must be 100 B/s")
         let center = NSWorkspace.shared.notificationCenter
         center.post(name: NSWorkspace.willSleepNotification, object: nil)
         center.post(name: NSWorkspace.didWakeNotification, object: nil)
         let waking = await engine.sample(at: base.addingTimeInterval(3))
+        try checkBoundary(waking.cpuUsage.isUnavailable,
+                          "First wake sample must rebuild the CPU baseline")
         try checkBoundary(waking.network.value?.downloadBytesPerSecond == nil,
                           "First sample after a 2-second sleep must rebuild the network baseline")
         let resumed = await engine.sample(at: base.addingTimeInterval(4))
+        try checkBoundary(resumed.cpuUsage.value == 0.3,
+                          "Second wake sample must restore CPU delta")
         try checkBoundary(resumed.network.value?.downloadBytesPerSecond == 100,
                           "Second wake sample must restore adjacent network rate")
         try checkBoundary(resumed.network.value?.uploadBytesPerSecond == 20, "Upload baseline also resets")
@@ -115,7 +120,7 @@ private enum BoundaryChecks {
     static func inFlightSleepAndLifetime() async throws {
         let center = NotificationCenter()
         var monitor: SystemSleepMonitor? = SystemSleepMonitor(center: center)
-        weak var weakMonitor = monitor
+        weak let weakMonitor = monitor
         let network = BoundaryGatedNetwork()
         var engine: MonitoringEngine? = MonitoringEngine(providers: ProviderSet(cpu: BoundaryCPU(),
             memory: BoundaryMemory(), network: network, disk: BoundaryDisk(), sensors: BoundarySensors()),
@@ -152,8 +157,12 @@ private enum BoundaryChecks {
     }
 }
 
-private struct BoundaryCPU: CPUProviding {
-    func sample() -> CPUTicks { CPUTicks(user: 10, system: 0, nice: 0, idle: 90) }
+private actor BoundaryCPU: CPUProviding {
+    private var count: UInt64 = 0
+    func sample() -> CPUTicks {
+        count += 1
+        return CPUTicks(user: 10 + count * 30, system: 0, nice: 0, idle: 90 + count * 70)
+    }
 }
 private struct BoundaryMemory: MemoryProviding {
     func sample() -> MemoryMetric { MemoryMetric(usage: 0.5, usedBytes: 50, totalBytes: 100) }

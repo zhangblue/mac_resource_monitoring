@@ -384,9 +384,13 @@ private enum MonitoringChecks {
                     "Failed temperature does not hide fan")
         try require(third.thermal.value?.temperature.value == 55
                     && third.thermal.value?.fan.value == .rpm(1800), "Both readings recover")
-        try require(second.cpuUsage.value == 0.3 && second.memory.value?.usage == 0.5
-                    && second.network.value != nil && second.disk.value?.usedBytes == 502,
-                    "Peer metrics commit despite sensor subfailure")
+        for (index, snapshot) in [first, second, third].enumerated() {
+            try require(snapshot.memory.value?.usage == 0.5 && snapshot.disk.value?.usedBytes == UInt64(501 + index)
+                        && snapshot.network.value != nil,
+                        "Memory, network and disk commit despite either sensor subfailure or recovery")
+        }
+        try require(first.cpuUsage.isUnavailable && second.cpuUsage.value == 0.3
+                    && third.cpuUsage.value == 0.3, "CPU baseline and subsequent deltas survive sensor failures")
         let drained = await waitUntil { await logger.events.count == 15 }
         let events = await logger.events
         let sensorEvents = events.filter { $0.0 == .sensors }

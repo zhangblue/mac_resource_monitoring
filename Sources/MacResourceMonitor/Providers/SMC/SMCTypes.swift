@@ -12,6 +12,7 @@ struct SMCValue: Sendable {
 enum SMCError: Error {
     case unsupportedType(String)
     case insufficientBytes(type: String, expected: Int, actual: Int)
+    case invalidPayloadLength(type: String, expected: Int, actual: Int)
     case invalidKey(String)
     case invalidLayout
     case serviceUnavailable
@@ -47,14 +48,17 @@ enum SMCDecoder {
         guard bytes.count >= length else {
             throw SMCError.insufficientBytes(type: type, expected: length, actual: bytes.count)
         }
+        guard bytes.count == length else {
+            throw SMCError.invalidPayloadLength(type: type, expected: length, actual: bytes.count)
+        }
         // Integer and fixed-point payloads use network byte order.
-        let integer = bytes.prefix(length).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+        let integer = bytes.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
         switch type {
         case "sp78": return Double(Int16(bitPattern: UInt16(integer))) / 256
         case "fpe2": return Double(integer) / 4
         case "flt ":
             // AppleSMC floats use native little-endian IEEE 754 on Apple Silicon.
-            let bits = bytes.prefix(4).enumerated().reduce(UInt32(0)) {
+            let bits = bytes.enumerated().reduce(UInt32(0)) {
                 $0 | (UInt32($1.element) << (8 * $1.offset))
             }
             return Double(Float(bitPattern: bits))

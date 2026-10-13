@@ -108,12 +108,14 @@ enum MetricPresentation {
         switch reading {
         case .unavailable: return "暂不可用"
         case let .value(thermal):
-            return thermal.temperature.value?.isFinite == true ? "" : "暂不可用"
+            return thermal.temperature.value.map { (10...125).contains($0) && $0.isFinite } == true
+                ? "" : "暂不可用"
         }
     }
 
     static func temperatureText(for reading: Reading<ThermalMetric>?) -> String {
-        guard let value = reading?.value?.temperature.value, value.isFinite else { return "—" }
+        guard let value = reading?.value?.temperature.value,
+              value.isFinite, (10...125).contains(value) else { return "—" }
         return String(format: "%.0f °C", value)
     }
 
