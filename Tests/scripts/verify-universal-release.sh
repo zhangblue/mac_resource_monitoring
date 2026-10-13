@@ -55,11 +55,48 @@ make_dmg
 verify >"$fixture/result.log" 2>&1 || { cat "$fixture/result.log" >&2; exit 1; }
 echo 'PASS: accepted valid universal app and DMG'
 
+# A previously valid app must not be shipped when rebuilding current source fails.
+# Use a failing builder so this test never touches the repository's dist/.
+printf '#!/usr/bin/env bash\nexit 42\n' > "$fixture/scripts/build-app.sh"
+if bash "$fixture/scripts/build-dmg.sh" >"$fixture/result.log" 2>&1; then
+    echo 'FAIL: packager reused an old valid app after rebuild failed' >&2
+    exit 1
+fi
+if test -e "$dmg" || test -e "$app"; then
+    echo 'FAIL: packager retained a stale release artifact after rebuild failed' >&2
+    exit 1
+fi
+echo 'PASS: failed rebuild cannot package or retain old valid app'
+
+# Successful rebuild replaces an old valid app with different valid executable bytes.
+vtool -set-build-version macos 13.0 15.0 -replace -output "$fixture/fresh-intel" "$intel" >/dev/null
+lipo -create "$arm" "$fixture/fresh-intel" -output "$fixture/fresh-universal"
+make_app "$fixture/fresh-universal"
+cp -R "$app" "$fixture/current.app"
+make_app "$fixture/universal"
+old_hash="$(shasum -a 256 "$binary")"
+old_hash="${old_hash%% *}"
+printf '#!/usr/bin/env bash\nset -e\ncp -R %q %q\n' "$fixture/current.app" "$app" > "$fixture/scripts/build-app.sh"
+cp "$repo_root/INSTALL.md" "$fixture/INSTALL.md"
+bash "$fixture/scripts/build-dmg.sh" >"$fixture/result.log" 2>&1 || { cat "$fixture/result.log" >&2; exit 1; }
+new_hash="$(shasum -a 256 "$binary")"
+new_hash="${new_hash%% *}"
+test "$old_hash" != "$new_hash" || { echo 'FAIL: old executable was reused' >&2; exit 1; }
+verify >"$fixture/result.log" 2>&1 || { cat "$fixture/result.log" >&2; exit 1; }
+echo 'PASS: packager rebuilt old valid app and verified fresh DMG'
+
 make_app "$arm"
 make_dmg
 reject 'arm64-only app and DMG' 'expected exactly arm64 and x86_64'
+cp -R "$app" "$fixture/thin.app"
+printf '#!/usr/bin/env bash\nset -e\ncp -R %q %q\n' "$fixture/thin.app" "$app" > "$fixture/scripts/build-app.sh"
 if bash "$fixture/scripts/build-dmg.sh" >"$fixture/result.log" 2>&1 || test -e "$dmg"; then
     echo 'FAIL: packager accepted thin app or retained stale DMG' >&2
+    exit 1
+fi
+if ! grep -Fq 'expected exactly arm64 and x86_64' "$fixture/result.log"; then
+    echo 'FAIL: packager rejected thin app for the wrong reason' >&2
+    cat "$fixture/result.log" >&2
     exit 1
 fi
 echo 'PASS: packager rejects thin app and removes stale DMG'
