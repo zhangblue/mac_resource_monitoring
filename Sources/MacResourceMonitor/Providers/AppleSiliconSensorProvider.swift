@@ -21,7 +21,7 @@ struct AppleSiliconSensorProvider: Sendable {
     // Preserve a successful processor reading when the fan read fails (and vice versa).
     func sample() throws -> ThermalMetric {
         let fan: Reading<FanMetric>
-        do { fan = .value(try readFan()) }
+        do { fan = .value(try SMCSensorReadings.fan(from: transport)) }
         catch { fan = .unavailable("风扇采集失败") }
 
         var temperatures: [String: Double] = [:]
@@ -33,22 +33,5 @@ struct AppleSiliconSensorProvider: Sendable {
         let temperature: Reading<Double> = SensorSelection.chipTemperature(temperatures)
             .map(Reading<Double>.value) ?? .unavailable("温度采集失败")
         return ThermalMetric(temperature: temperature, fan: fan)
-    }
-
-    private func readFan() throws -> FanMetric {
-        let fanCount = try transport.read("FNum").decoded()
-        guard fanCount.isFinite, fanCount >= 0, fanCount <= 10,
-              fanCount.rounded(.towardZero) == fanCount else {
-            throw SMCError.invalidFanCount
-        }
-        if fanCount == 0 { return .fanless }
-        var speeds: [Double] = []
-        for index in 0..<Int(fanCount) {
-            let key = "F\(index)Ac"
-            let speed = try transport.read(key).decoded()
-            guard speed.isFinite, speed >= 0 else { throw SMCError.invalidFanSpeed(key) }
-            speeds.append(speed)
-        }
-        return .rpm(speeds.max()!)
     }
 }

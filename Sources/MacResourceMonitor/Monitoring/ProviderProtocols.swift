@@ -23,6 +23,7 @@ protocol SensorProviding: Sendable {
 extension NetworkProvider: NetworkProviding {}
 extension DiskProvider: DiskProviding {}
 extension AppleSiliconSensorProvider: SensorProviding {}
+extension IntelSensorProvider: SensorProviding {}
 
 struct ProviderSet: Sendable {
     let cpu: any CPUProviding
@@ -32,19 +33,40 @@ struct ProviderSet: Sendable {
     let sensors: any SensorProviding
 
     static var live: ProviderSet {
+        live(intelSensor: { try IntelSensorProvider() },
+             appleSiliconSensor: { try AppleSiliconSensorProvider() })
+    }
+
+    static func live(
+        intelSensor: @escaping @Sendable () throws -> any SensorProviding,
+        appleSiliconSensor: @escaping @Sendable () throws -> any SensorProviding
+    ) -> ProviderSet {
         ProviderSet(cpu: CPUProvider(), memory: MemoryProvider(), network: NetworkProvider(),
-                    disk: DiskProvider(), sensors: SystemSensorProvider())
+                    disk: DiskProvider(), sensors: SystemSensorProvider(factory: {
+                        #if arch(x86_64)
+                        return try intelSensor()
+                        #elseif arch(arm64)
+                        return try appleSiliconSensor()
+                        #else
+                        #error("Unsupported sensor architecture")
+                        #endif
+                    }))
     }
 }
 
 // Opening SMC can fail independently of every other provider. Defer opening to
 // sampling so the engine can represent that error as an unavailable sensor.
-private actor SystemSensorProvider: SensorProviding {
-    private var provider: AppleSiliconSensorProvider?
+actor SystemSensorProvider: SensorProviding {
+    private let factory: @Sendable () throws -> any SensorProviding
+    private var provider: (any SensorProviding)?
 
-    func sample() throws -> ThermalMetric {
-        if provider == nil { provider = try AppleSiliconSensorProvider() }
-        return try provider!.sample()
+    init(factory: @escaping @Sendable () throws -> any SensorProviding) {
+        self.factory = factory
+    }
+
+    func sample() async throws -> ThermalMetric {
+        if provider == nil { provider = try factory() }
+        return try await provider!.sample()
     }
 }
 
