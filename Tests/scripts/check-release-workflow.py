@@ -22,6 +22,9 @@ require(len(jobs) == 2, "expected jobs section")
 require(re.findall(r'^  [\w-]+:\s*$', jobs[1], re.M) == ["  build-and-release:"], "expected one release job")
 require(not re.search(r'^\s+(?:if|continue-on-error):', text, re.M), "conditional or nonfatal steps are not permitted")
 require(not re.search(r'^\s+(?:needs|strategy):', text, re.M), "unexpected job topology")
+# A custom shell template can ignore {0}, making an unchanged run: line inert.
+# No shell/defaults override belongs in this fixed release workflow.
+require(not re.search(r'^\s*(?:shell|defaults)\s*:', text, re.M), "shell or defaults override is not permitted")
 
 steps = []
 for line in lines:

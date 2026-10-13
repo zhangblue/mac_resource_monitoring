@@ -71,6 +71,31 @@ class ReleaseWorkflowGateTests(unittest.TestCase):
         result = self.check_workflow(self.replaced_run("run: swift test", "run: swift test || true"))
         self.assertNotEqual(result.returncode, 0, result.stdout)
 
+    def test_verify_step_custom_shell_cannot_skip_run(self):
+        workflow = self.replaced_run(
+            "        run: bash scripts/verify-release.sh",
+            '        shell: bash -c "echo bypassed" -- {0}\n        run: bash scripts/verify-release.sh')
+        result = self.check_workflow(workflow)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_job_custom_shell_is_rejected(self):
+        workflow = self.replaced_run(
+            "    runs-on: macos-15", "    runs-on: macos-15\n    defaults:\n      run:\n        shell: bash -c 'echo bypassed' -- {0}")
+        result = self.check_workflow(workflow)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_workflow_defaults_shell_is_rejected(self):
+        workflow = self.replaced_run(
+            "jobs:\n", "defaults:\n  run:\n    shell: bash -c 'echo bypassed' -- {0}\n\njobs:\n")
+        result = self.check_workflow(workflow)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_workflow_inline_defaults_are_rejected(self):
+        workflow = self.replaced_run(
+            "jobs:\n", "defaults: {run: {shell: bash}}\n\njobs:\n")
+        result = self.check_workflow(workflow)
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+
     def test_extra_job_is_rejected(self):
         result = self.check_workflow(WORKFLOW + "\n  bypass:\n    runs-on: macos-15\n")
         self.assertNotEqual(result.returncode, 0, result.stdout)
