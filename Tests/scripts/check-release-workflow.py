@@ -50,8 +50,25 @@ for step, (name, command) in zip(steps, expected):
     if name == "Checkout source":
         require("uses: actions/checkout@v6" in body, "checkout action changed")
         continue
-    require(re.search(r'^        run: (?:\||.+)$', body, re.M), f"{name} lacks run")
-    require(command in body, f"{name} lacks {command}")
+    # These release commands have a deliberately fixed shape. Comparing the
+    # run statement (not a substring of the step) prevents echo, comments and
+    # quoted strings from masquerading as executable commands.
+    run_lines = [line for line in step["lines"] if line.startswith("        run:")]
+    require(len(run_lines) == 1, f"{name} needs exactly one run statement")
+    if name in ("Generate checksum", "Create GitHub Release"):
+        require(run_lines[0] == "        run: |", f"{name} needs a script block")
+        start = step["lines"].index(run_lines[0]) + 1
+        script = step["lines"][start:]
+        while script and not script[-1].strip():
+            script.pop()
+        first_command = ("          gh release create \"$GITHUB_REF_NAME\" \\" if name == "Create GitHub Release"
+                         else "          " + command + " \\")
+        require(script and script[0] == first_command, f"{name} must execute {command}")
+        require(all(line.startswith("          ") and line.strip() and not line.lstrip().startswith("#") for line in script),
+                f"{name} has an unexpected script line")
+    else:
+        require(run_lines[0] == "        run: " + command, f"{name} must execute {command}")
+        require(not any(line.startswith("          ") for line in step["lines"]), f"{name} has unexpected run contents")
     require("||" not in body and not re.search(r'\b(?:true|exit 0)\b', body), f"{name} suppresses errors")
 
 checksum = "\n".join(steps[-2]["lines"])
