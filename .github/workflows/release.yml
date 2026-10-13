@@ -20,8 +20,17 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v6
 
+      - name: Check release workflow
+        run: python3 Tests/scripts/check-release-workflow.py
+
       - name: Run tests
         run: swift test
+
+      - name: Build arm64 release
+        run: swift build -c release --arch arm64
+
+      - name: Build x86_64 release
+        run: swift build -c release --arch x86_64
 
       - name: Build application
         run: bash scripts/build-app.sh

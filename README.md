@@ -1,17 +1,17 @@
 # Mac Resource Monitor
 
-Mac Resource Monitor 是一款面向 Apple Silicon 的 macOS 菜单栏资源监视器，可快速查看系统资源状态。
+Mac Resource Monitor 是一款面向 Apple Silicon 和 Intel Mac 的 macOS 菜单栏资源监视器。单一 DMG 包含 arm64 与 x86_64 的 universal 应用；Intel 真机运行与传感器适配仍待验收。
 
 ## 当前功能
 
 - 菜单栏仅显示 CPU、内存、网络上传和下载摘要；应用没有常驻 Dock 图标。
-- 面板提供 CPU、内存、上传和下载趋势，以及芯片温度和风扇状态。
+- 面板提供 CPU、内存、上传和下载趋势，以及温度和风扇状态。传感器尽力读取，温度、风扇可分别不可用（显示「— / 暂不可用」），不影响其他指标。
 - 磁盘仅统计系统启动卷的已用容量和总容量，不显示磁盘读写速率。
 - 默认每 1 秒刷新，默认保留最近 5 分钟趋势；可在设置中选择 1/3/5 秒刷新间隔和 1/5/10 分钟历史时长。
 
 ## 系统要求
 
-- Apple Silicon Mac。
+- Apple Silicon 或 Intel Mac（universal 产物兼容双架构；Intel 真机尚未验收）。
 - macOS 13 或更高版本。
 - 从源码构建需要完整 Xcode，并已同意 Xcode 许可证；项目使用 Swift Package Manager。
 
@@ -29,11 +29,12 @@ swift run MacResourceMonitor
 
 ## 编译
 
-构建调试版本和 arm64 Release 可执行文件：
+构建调试版本和两个架构的 Release 可执行文件：
 
 ```bash
 swift build
 swift build -c release --arch arm64
+swift build -c release --arch x86_64
 ```
 
 生成可运行的应用包：

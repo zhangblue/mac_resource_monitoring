@@ -6,7 +6,16 @@
 
 系统：macOS 15.7.9（arm64）
 
-范围：Apple Silicon、macOS 13 或更高版本、菜单栏应用、ad-hoc 签名且未公证。
+范围（2026-10-01 历史验收）：Apple Silicon、macOS 13 或更高版本、菜单栏应用、ad-hoc 签名且未公证。下文历史测试、旧 DMG 哈希及绝对路径不是当前 Intel universal 产物的验收证据。
+
+## Intel universal 发布门禁（2026-10-13，MRM-INTEL-08）
+
+- 目标：macOS 13+ 单一 universal app/DMG 包含 arm64 和 x86_64；Intel 真机运行及 SMC 候选键/温度与风扇仍 **BLOCKED，未验收**。跨架构构建与模拟测试不等于真机验证。Apple Silicon 实际界面/功能回归亦待人工确认。
+- 发布工作流应先执行 `python3 Tests/scripts/check-release-workflow.py`、`swift test`、`swift build -c release --arch arm64`、`swift build -c release --arch x86_64`，然后 `bash scripts/build-app.sh`、`bash scripts/build-dmg.sh`、`bash scripts/verify-release.sh`；仅验证通过后生成 DMG SHA-256，再创建 Release。任何失败不得创建/上传 Release。
+- 本地验收应记录两 slice 的 `lipo -archs`、`vtool -show-build -arch arm64` 和 `-arch x86_64` 各自 `minos 13.0`、app/DMG 内可执行文件 SHA-256 相同及两份 app ad-hoc 严格签名；保留 `LSUIElement=true`、安装说明与 Applications 链接。发布仍未公证；不要求关闭 Gatekeeper。
+- 人工验收（**BLOCKED：需 macOS 13+ Intel 真机**）：记录机型、OS、x86_64 包运行、XCTest、菜单栏 CPU/内存/上传/下载、趋势、设置/持久化、启动卷容量、睡眠后速率；记录脱敏 SMC 键/类型观测、温度/风扇各自数值或「— / 暂不可用」，仅可信 `FNum=0` 才确认无风扇。重复 arm64 真机启动与功能回归。不得在验收前声称 Intel 传感器可靠或公开完全支持已验证。
+- 本轮本地证据：静态工作流门禁先因缺少双架构构建失败，补齐后通过；`swift test` 155 项、0 失败；两个 release 架构构建、`Tests/scripts/verify-universal-release.sh` 正反例、`build-app.sh`、`build-dmg.sh`、`verify-release.sh`、`git diff --check` 均退出 0。最终 app `lipo -archs` 为 `x86_64 arm64`，两 slice `vtool` 均为 `platform MACOS / minos 13.0`，`codesign -dv` 为 `Signature=adhoc`；发布校验脚本核对 DMG 内双 slice、逐 slice minos、签名及 app/DMG 可执行文件 SHA-256 一致。此为本机构建证据，不是 GitHub `macos-15` runner 或 Intel 真机运行证据。
+- 本次仅本地构建和提交；不得 push/tag/publish、安装 `/Applications` 或改变真实登录项。不沿用下方历史哈希。
 
 ## 结论摘要
 

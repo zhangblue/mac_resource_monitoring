@@ -1,6 +1,6 @@
 # 安装 Mac Resource Monitor
 
-当前版本支持 Apple Silicon Mac 和 macOS 13 或更高版本。应用常驻菜单栏，不会在 Dock 中显示图标；点击菜单栏中的 CPU、内存、上传和下载摘要，可查看五分钟趋势、芯片温度、风扇状态以及系统启动卷的已用/总容量。
+单一 DMG 内的 universal 应用面向 Apple Silicon 与 Intel Mac，最低 macOS 13。Intel 真机运行尚未验收，不能将构建兼容视为实机验证。应用常驻菜单栏，不会在 Dock 中显示图标；点击菜单栏中的 CPU、内存、上传和下载摘要，可查看默认五分钟趋势、温度、风扇状态以及系统启动卷的已用/总容量。温度和风扇分别尽力读取，任一项不可用时显示「— / 暂不可用」，不影响其他指标；Intel 的 SMC 温度候选键仍待真机核验。
 
 1. 双击 `MacResourceMonitor.dmg` 挂载磁盘映像。
 2. 将 `MacResourceMonitor.app` 拖到映像中的 `Applications` 快捷方式，完成安装。
