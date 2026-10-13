@@ -181,7 +181,7 @@ private struct BoundaryDisk: DiskProviding {
     func sample() -> DiskMetric { DiskMetric(usedBytes: 50, totalBytes: 100) }
 }
 private struct BoundarySensors: SensorProviding {
-    func sample() -> ThermalMetric { ThermalMetric(chipTemperatureCelsius: nil, fan: .fanless) }
+    func sample() -> ThermalMetric { ThermalMetric(temperature: .unavailable("missing"), fan: .value(.fanless)) }
 }
 private struct BoundaryLogger: DiagnosticLogging {
     func record(component: DiagnosticComponent, failure: String?, at date: Date) {}

@@ -44,10 +44,10 @@ struct DashboardView: View {
                                detail: networkStatus(store.snapshot?.network.value?.downloadBytesPerSecond),
                                points: store.history.download.elements, sparklineStyle: .download,
                                historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval)
-                MetricCardView(title: "芯片温度", value: temperature,
+                MetricCardView(title: "芯片温度", value: MetricPresentation.temperatureText(for: store.snapshot?.thermal),
                                detail: MetricPresentation.temperatureStatus(for: store.snapshot?.thermal))
-                MetricCardView(title: "风扇", value: fan,
-                               detail: thermalStatus(store.snapshot?.thermal.value?.fan != nil))
+                MetricCardView(title: "风扇", value: MetricPresentation.fanText(for: store.snapshot?.thermal),
+                               detail: MetricPresentation.fanStatus(for: store.snapshot?.thermal))
             }
             diskCard
             HStack {
@@ -113,25 +113,5 @@ struct DashboardView: View {
         return bytes == nil ? "等待下一次采样" : store.settings.historyDuration.recentLabel
     }
 
-    private var temperature: String {
-        guard let value = store.snapshot?.thermal.value?.chipTemperatureCelsius,
-              value.isFinite else { return "—" }
-        return String(format: "%.0f °C", value)
-    }
-
-    private var fan: String {
-        guard let fan = store.snapshot?.thermal.value?.fan else { return "—" }
-        switch fan {
-        case let .rpm(value): return MetricFormatter.rpm(value)
-        case .fanless: return "无风扇"
-        }
-    }
-
-    private func thermalStatus(_ available: Bool) -> String {
-        guard store.snapshot?.thermal.value != nil else {
-            return MetricPresentation.status(for: store.snapshot?.thermal, historyDuration: store.settings.historyDuration)
-        }
-        return available ? "" : "等待下一次采样"
-    }
 
 }

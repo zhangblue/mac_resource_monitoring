@@ -108,9 +108,29 @@ enum MetricPresentation {
         switch reading {
         case .unavailable: return "暂不可用"
         case let .value(thermal):
-            guard let temperature = thermal.chipTemperatureCelsius,
-                  temperature.isFinite else { return "暂不可用" }
-            return ""
+            return thermal.temperature.value?.isFinite == true ? "" : "暂不可用"
+        }
+    }
+
+    static func temperatureText(for reading: Reading<ThermalMetric>?) -> String {
+        guard let value = reading?.value?.temperature.value, value.isFinite else { return "—" }
+        return String(format: "%.0f °C", value)
+    }
+
+    static func fanStatus(for reading: Reading<ThermalMetric>?) -> String {
+        guard let reading else { return "等待下一次采样" }
+        guard let fan = reading.value?.fan.value else { return "暂不可用" }
+        switch fan {
+        case let .rpm(value): return value.isFinite && value >= 0 ? "" : "暂不可用"
+        case .fanless: return ""
+        }
+    }
+
+    static func fanText(for reading: Reading<ThermalMetric>?) -> String {
+        guard let fan = reading?.value?.fan.value else { return "—" }
+        switch fan {
+        case let .rpm(value): return value.isFinite && value >= 0 ? MetricFormatter.rpm(value) : "—"
+        case .fanless: return "无风扇"
         }
     }
 }

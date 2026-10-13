@@ -18,27 +18,11 @@ struct AppleSiliconSensorProvider: Sendable {
         transport = try SMCClient()
     }
 
-    // A missing temperature is represented by nil; any fan failure throws so the
-    // coordinator can emit Reading.unavailable rather than a fictitious zero RPM.
+    // Preserve a successful processor reading when the fan read fails (and vice versa).
     func sample() throws -> ThermalMetric {
-        let fanCount = try transport.read("FNum").decoded()
-        guard fanCount.isFinite, fanCount >= 0, fanCount <= 10,
-              fanCount.rounded(.towardZero) == fanCount else {
-            throw SMCError.invalidFanCount
-        }
-        let fan: FanMetric
-        if fanCount == 0 {
-            fan = .fanless
-        } else {
-            var speeds: [Double] = []
-            for index in 0..<Int(fanCount) {
-                let key = "F\(index)Ac"
-                let speed = try transport.read(key).decoded()
-                guard speed.isFinite, speed >= 0 else { throw SMCError.invalidFanSpeed(key) }
-                speeds.append(speed)
-            }
-            fan = .rpm(speeds.max()!)
-        }
+        let fan: Reading<FanMetric>
+        do { fan = .value(try readFan()) }
+        catch { fan = .unavailable("风扇采集失败") }
 
         var temperatures: [String: Double] = [:]
         // Some temperature keys can be absent, inaccessible, or unsupported even
@@ -46,6 +30,25 @@ struct AppleSiliconSensorProvider: Sendable {
         for key in (try? transport.allKeys()) ?? [] where key.hasPrefix("Tp") {
             if let value = try? transport.read(key).decoded() { temperatures[key] = value }
         }
-        return ThermalMetric(chipTemperatureCelsius: SensorSelection.chipTemperature(temperatures), fan: fan)
+        let temperature: Reading<Double> = SensorSelection.chipTemperature(temperatures)
+            .map(Reading<Double>.value) ?? .unavailable("温度采集失败")
+        return ThermalMetric(temperature: temperature, fan: fan)
+    }
+
+    private func readFan() throws -> FanMetric {
+        let fanCount = try transport.read("FNum").decoded()
+        guard fanCount.isFinite, fanCount >= 0, fanCount <= 10,
+              fanCount.rounded(.towardZero) == fanCount else {
+            throw SMCError.invalidFanCount
+        }
+        if fanCount == 0 { return .fanless }
+        var speeds: [Double] = []
+        for index in 0..<Int(fanCount) {
+            let key = "F\(index)Ac"
+            let speed = try transport.read(key).decoded()
+            guard speed.isFinite, speed >= 0 else { throw SMCError.invalidFanSpeed(key) }
+            speeds.append(speed)
+        }
+        return .rpm(speeds.max()!)
     }
 }

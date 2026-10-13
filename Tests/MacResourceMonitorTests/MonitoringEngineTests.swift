@@ -11,6 +11,12 @@ final class MonitoringEngineTests: XCTestCase {
     func testOneProviderFailureDoesNotDropOtherMetrics() async throws {
         try await MonitoringChecks.failureIsolation()
     }
+    func testSensorSubfailureDiagnostic() async throws {
+        try await MonitoringChecks.sensorSubfailureDiagnostic()
+    }
+    func testSensorDiagnosticLogRetainsIndependentFailureCategory() async throws {
+        try await MonitoringChecks.sensorDiagnosticLogCategories()
+    }
 
     func testConfigurationUpdateTrimsAndPublishesWithoutRebuildingStream() async throws {
         try await MonitoringChecks.configurationTrimsAndPublishes()
@@ -199,7 +205,7 @@ private extension MetricSnapshot {
         MetricSnapshot(timestamp: Date(timeIntervalSince1970: second), cpuUsage: .value(0.25),
                        memory: .value(MemoryMetric(usage: 0.5, usedBytes: 500, totalBytes: 1_000)),
                        network: .value(NetworkMetric(downloadBytesPerSecond: 100, uploadBytesPerSecond: 50)),
-                       thermal: .value(ThermalMetric(chipTemperatureCelsius: 40, fan: .fanless)),
+                       thermal: .value(ThermalMetric(temperature: .value(40), fan: .value(.fanless))),
                        disk: .value(DiskMetric(usedBytes: 500, totalBytes: 1_000)))
     }
 }
@@ -248,6 +254,25 @@ private actor FailingDiagnosticLogger: DiagnosticLogging {
 
 private actor SilentDiagnosticLogger: DiagnosticLogging {
     func record(component: DiagnosticComponent, failure: String?, at date: Date) {}
+}
+
+private actor SensorDiagnosticRecorder: DiagnosticLogging {
+    private(set) var events: [(DiagnosticComponent, String?, Date)] = []
+    func record(component: DiagnosticComponent, failure: String?, at date: Date) {
+        events.append((component, failure, date))
+    }
+}
+
+private actor RecoveringSensorProvider: SensorProviding {
+    private var index = 0
+    func sample() -> ThermalMetric {
+        defer { index += 1 }
+        switch index {
+        case 0: return .init(temperature: .value(54.5), fan: .unavailable("private fan failure"))
+        case 1: return .init(temperature: .unavailable("private temperature failure"), fan: .value(.rpm(1820)))
+        default: return .init(temperature: .value(55), fan: .value(.rpm(1800)))
+        }
+    }
 }
 
 private actor GatedDiagnosticLogger: DiagnosticLogging {
@@ -300,9 +325,10 @@ private actor FakeDiskProvider: DiskProviding {
 private struct FakeSensorProvider: SensorProviding {
     var fails = false
     var fan: FanMetric = .fanless
+    var temperature: Reading<Double> = .value(40)
     func sample() throws -> ThermalMetric {
         if fails { throw MonitoringTestError.failed }
-        return ThermalMetric(chipTemperatureCelsius: nil, fan: fan)
+        return ThermalMetric(temperature: temperature, fan: .value(fan))
     }
 }
 
@@ -322,6 +348,55 @@ private actor GatedMemoryProvider: MemoryProviding {
 }
 
 private enum MonitoringChecks {
+    static func sensorDiagnosticLogCategories() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mac-resource-monitor-sensors-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let logURL = directory.appendingPathComponent("diagnostics.log")
+        let logger = DiagnosticLogger(logURL: logURL)
+        let engine = MonitoringEngine(providers: providers(memory: FakeMemoryProvider(fails: false),
+                                                            sensors: RecoveringSensorProvider()), logger: logger)
+        for second in 1...3 { _ = await engine.sample(at: Date(timeIntervalSince1970: Double(second))) }
+        let logged = await waitUntil {
+            (try? String(contentsOf: logURL, encoding: .utf8).split(separator: "\n").count) == 2
+        }
+        try require(logged, "Two independent sensor failures reach the disk log")
+        let content = try String(contentsOf: logURL, encoding: .utf8)
+        try require(content.contains("sensors temperatureOk_fanUnavailable")
+                    && content.contains("sensors temperatureUnavailable_fanOk"),
+                    "Disk log retains which sensor failed without exposing raw errors")
+        try require(!content.contains("private"), "Sensor diagnostic categories redact source errors")
+    }
+
+    static func sensorSubfailureDiagnostic() async throws {
+        let logger = SensorDiagnosticRecorder()
+        let engine = MonitoringEngine(providers: providers(memory: FakeMemoryProvider(fails: false),
+                                                            sensors: RecoveringSensorProvider(), cpu: AdvancingCPUProvider()),
+                                      logger: logger)
+        let first = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        let second = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        let third = await engine.sample(at: Date(timeIntervalSince1970: 3))
+        try require(first.thermal.value?.temperature.value == 54.5
+                    && first.thermal.value?.fan.isUnavailable == true,
+                    "Failed fan does not hide temperature")
+        try require(second.thermal.value?.temperature.isUnavailable == true
+                    && second.thermal.value?.fan.value == .rpm(1820),
+                    "Failed temperature does not hide fan")
+        try require(third.thermal.value?.temperature.value == 55
+                    && third.thermal.value?.fan.value == .rpm(1800), "Both readings recover")
+        try require(second.cpuUsage.value == 0.3 && second.memory.value?.usage == 0.5
+                    && second.network.value != nil && second.disk.value?.usedBytes == 502,
+                    "Peer metrics commit despite sensor subfailure")
+        let drained = await waitUntil { await logger.events.count == 15 }
+        let events = await logger.events
+        let sensorEvents = events.filter { $0.0 == .sensors }
+        try require(drained && sensorEvents.count == 3, "Each sensor sample reaches diagnostics")
+        try require(sensorEvents[0].1 == "temperatureOk_fanUnavailable"
+                    && sensorEvents[1].1 == "temperatureUnavailable_fanOk"
+                    && sensorEvents[2].1 == nil,
+                    "Independent sensor errors are redacted, stable, and cleared on recovery")
+    }
+
     static func waitUntil(timeout: Duration = .seconds(2),
                           _ condition: @escaping @Sendable () async -> Bool) async -> Bool {
         let deadline = ContinuousClock.now.advanced(by: timeout)
@@ -743,23 +818,24 @@ private enum MonitoringChecks {
                     "Restart and wake each commit once without reviving an old loop")
     }
 
-    // Fails if a thrown memory read cancels other providers, or nil temperature becomes unavailable.
+    // Fails if a thrown memory read cancels other providers or masks an unavailable temperature.
     static func failureIsolation() async throws {
-        let engine = makeEngine(providers: providers(cpu: AdvancingCPUProvider()))
+        let engine = makeEngine(providers: providers(sensors: FakeSensorProvider(temperature: .unavailable("missing")),
+                                                     cpu: AdvancingCPUProvider()))
         _ = await engine.sample(at: Date(timeIntervalSince1970: 0))
         let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
         try require(snapshot.cpuUsage.value == 0.3, "CPU survives memory failure")
         try require(snapshot.memory.isUnavailable, "Memory error is unavailable")
         try require(snapshot.disk.value?.usedBytes == 502, "Disk capacity survives memory failure")
-        try require(snapshot.thermal.value?.fan == .fanless, "Fanless state survives nil temperature")
-        try require(snapshot.thermal.value?.chipTemperatureCelsius == nil, "Unknown temperature stays nil")
+        try require(snapshot.thermal.value?.fan.value == .fanless, "Fanless state survives unavailable temperature")
+        try require(snapshot.thermal.value?.temperature.isUnavailable == true, "Unknown temperature stays unavailable")
         let failedSensors = makeEngine(providers: providers(memory: FakeMemoryProvider(fails: false),
                                                                   sensors: FakeSensorProvider(fails: true)))
         let failed = await failedSensors.sample(at: Date())
         try require(failed.thermal.isUnavailable && failed.memory.value?.usage == 0.5, "Sensor failure is isolated")
         let stoppedFan = makeEngine(providers: providers(sensors: FakeSensorProvider(fan: .rpm(0))))
         let stopped = await stoppedFan.sample(at: Date())
-        try require(stopped.thermal.value?.fan == .rpm(0), "Zero RPM is distinct from fanless")
+        try require(stopped.thermal.value?.fan.value == .rpm(0), "Zero RPM is distinct from fanless")
         let failedCounters = makeEngine(providers: ProviderSet(
             cpu: FakeCPUProvider(result: .failure(.failed)), memory: FakeMemoryProvider(fails: false),
             network: FakeNetworkProvider(fails: true), disk: FailingDiskProvider(), sensors: FakeSensorProvider()
@@ -767,7 +843,7 @@ private enum MonitoringChecks {
         let counters = await failedCounters.sample(at: Date())
         try require(counters.cpuUsage.isUnavailable && counters.network.isUnavailable && counters.disk.isUnavailable,
                     "Each counter provider reports its own failure")
-        try require(counters.memory.value?.usage == 0.5 && counters.thermal.value?.fan == .fanless,
+        try require(counters.memory.value?.usage == 0.5 && counters.thermal.value?.fan.value == .fanless,
                     "Counter failures preserve independent memory and sensors")
     }
 
@@ -806,7 +882,7 @@ private enum MonitoringChecks {
         let logged = await waitUntil { await logger.callCount == 5 }
         let outcomes = await logger.outcomes
         try require(snapshot.disk.isUnavailable, "Failed disk capacity read becomes unavailable")
-        try require(snapshot.memory.value?.usedBytes == 500 && snapshot.thermal.value?.fan == .fanless,
+        try require(snapshot.memory.value?.usedBytes == 500 && snapshot.thermal.value?.fan.value == .fanless,
                     "Disk failure leaves independent metrics available")
         try require(logged && outcomes.map(\.1) == [false, false, false, true, false],
                     "Diagnostic log marks only disk collection as failed")

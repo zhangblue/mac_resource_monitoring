@@ -20,7 +20,9 @@ actor DiagnosticLogger: DiagnosticLogging {
         "capacityUnavailable", "unsupportedType", "insufficientBytes", "invalidKey",
         "invalidLayout", "serviceUnavailable", "ioFailure", "deviceFailure",
         "invalidResponseSize", "invalidDataSize", "invalidKeyCount",
-        "invalidFanCount", "invalidFanSpeed"
+        "invalidFanCount", "invalidFanSpeed",
+        "temperatureUnavailable_fanUnavailable", "temperatureUnavailable_fanOk",
+        "temperatureOk_fanUnavailable"
     ]
 
     private let logURL: URL

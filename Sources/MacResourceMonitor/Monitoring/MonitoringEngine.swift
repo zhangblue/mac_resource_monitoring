@@ -282,7 +282,23 @@ actor MonitoringEngine {
         await record(.memory, reading: readings.1, at: date, logger: logger)
         await record(.network, reading: readings.2, at: date, logger: logger)
         await record(.disk, reading: readings.3, at: date, logger: logger)
-        await record(.sensors, reading: readings.4, at: date, logger: logger)
+        let sensorFailure: String?
+        switch readings.4 {
+        case let .unavailable(reason): sensorFailure = reason
+        case let .value(thermal):
+            let temperatureFailed = thermal.temperature.isUnavailable
+            let fanFailed = thermal.fan.isUnavailable
+            if temperatureFailed && fanFailed {
+                sensorFailure = "temperatureUnavailable_fanUnavailable"
+            } else if temperatureFailed {
+                sensorFailure = "temperatureUnavailable_fanOk"
+            } else if fanFailed {
+                sensorFailure = "temperatureOk_fanUnavailable"
+            } else {
+                sensorFailure = nil
+            }
+        }
+        try? await logger.record(component: .sensors, failure: sensorFailure, at: date)
     }
 
     nonisolated private static func record<Value>(_ component: DiagnosticComponent, reading: Reading<Value>,

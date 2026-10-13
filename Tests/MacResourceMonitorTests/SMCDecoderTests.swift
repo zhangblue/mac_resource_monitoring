@@ -40,8 +40,16 @@ final class SMCDecoderTests: XCTestCase {
             "TB0T": SMCValue(type: "sp78", bytes: [0x50, 0])
         ]))
         let metric = try provider.sample()
-        XCTAssertEqual(metric.fan, .fanless)
-        XCTAssertEqual(metric.chipTemperatureCelsius, 54.5)
+        XCTAssertEqual(metric.fan.value, .fanless)
+        XCTAssertEqual(metric.temperature.value, 54.5)
+    }
+
+    func testAppleSiliconFanFailureRetainsTemperature() throws {
+        let metric = try AppleSiliconSensorProvider(transport: FakeSMC(values: [
+            "Tp01": SMCValue(type: "sp78", bytes: [0x36, 0x80])
+        ])).sample()
+        XCTAssertEqual(metric.temperature.value, 54.5)
+        XCTAssertTrue(metric.fan.isUnavailable)
     }
 
     func testMultipleFansUseHighestActualRPMIncludingStoppedFans() throws {
@@ -50,24 +58,24 @@ final class SMCDecoderTests: XCTestCase {
             "F0Ac": SMCValue(type: "fpe2", bytes: [0, 0]),
             "F1Ac": SMCValue(type: "fpe2", bytes: [0x1C, 0x70])
         ])).sample()
-        XCTAssertEqual(metric.fan, .rpm(1820))
-        XCTAssertNil(metric.chipTemperatureCelsius)
+        XCTAssertEqual(metric.fan.value, .rpm(1820))
+        XCTAssertTrue(metric.temperature.isUnavailable)
     }
 
-    func testMissingFanCountOrAnyFanReadingThrowsInsteadOfInventingZero() {
-        XCTAssertThrowsError(try AppleSiliconSensorProvider(transport: FakeSMC(values: [:])).sample())
-        XCTAssertThrowsError(try AppleSiliconSensorProvider(transport: FakeSMC(values: [
+    func testMissingFanCountOrAnyFanReadingIsUnavailableInsteadOfInventingZero() throws {
+        XCTAssertTrue(try AppleSiliconSensorProvider(transport: FakeSMC(values: [:])).sample().fan.isUnavailable)
+        XCTAssertTrue(try AppleSiliconSensorProvider(transport: FakeSMC(values: [
             "FNum": SMCValue(type: "ui8 ", bytes: [2]),
             "F0Ac": SMCValue(type: "fpe2", bytes: [0x1C, 0x70])
-        ])).sample())
+        ])).sample().fan.isUnavailable)
     }
 
-    func testInvalidFanValuesAreUnavailable() {
+    func testInvalidFanValuesAreUnavailable() throws {
         for bytes: [UInt8] in [[0, 0, 0xC0, 0x7F], [0, 0, 0x80, 0xBF]] {
-            XCTAssertThrowsError(try AppleSiliconSensorProvider(transport: FakeSMC(values: [
+            XCTAssertTrue(try AppleSiliconSensorProvider(transport: FakeSMC(values: [
                 "FNum": SMCValue(type: "ui8 ", bytes: [1]),
                 "F0Ac": SMCValue(type: "flt ", bytes: bytes)
-            ])).sample())
+            ])).sample().fan.isUnavailable)
         }
     }
 
@@ -76,12 +84,12 @@ final class SMCDecoderTests: XCTestCase {
             "FNum": SMCValue(type: "ui8 ", bytes: [0]),
             "Tp01": SMCValue(type: "sp78", bytes: [])
         ])).sample()
-        XCTAssertNil(metric.chipTemperatureCelsius)
+        XCTAssertTrue(metric.temperature.isUnavailable)
         let failedEnumeration = try AppleSiliconSensorProvider(transport: FakeSMC(
             values: ["FNum": SMCValue(type: "ui8 ", bytes: [0])], enumerationFails: true
         )).sample()
-        XCTAssertNil(failedEnumeration.chipTemperatureCelsius)
-        XCTAssertEqual(failedEnumeration.fan, .fanless)
+        XCTAssertTrue(failedEnumeration.temperature.isUnavailable)
+        XCTAssertEqual(failedEnumeration.fan.value, .fanless)
     }
 
     func testWireLayoutMatchesCABIAndFourCharacterKeyByteOrder() throws {

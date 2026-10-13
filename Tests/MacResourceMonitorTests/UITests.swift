@@ -336,8 +336,38 @@ final class UITests: XCTestCase {
 
     func testTemperatureMissingAfterSnapshotIsUnavailable() {
         XCTAssertEqual(MetricPresentation.temperatureStatus(for: nil), "等待下一次采样")
-        let thermal = ThermalMetric(chipTemperatureCelsius: nil, fan: .fanless)
+        let thermal = ThermalMetric(temperature: .unavailable("missing"), fan: .value(.fanless))
         XCTAssertEqual(MetricPresentation.temperatureStatus(for: .value(thermal)), "暂不可用")
+    }
+
+    func testIndependentThermalPresentation() {
+        let temperatureOnly: Reading<ThermalMetric> = .value(.init(
+            temperature: .value(54.5), fan: .unavailable("private fan key")))
+        XCTAssertEqual(MetricPresentation.temperatureText(for: temperatureOnly), "54 °C")
+        XCTAssertEqual(MetricPresentation.temperatureStatus(for: temperatureOnly), "")
+        XCTAssertEqual(MetricPresentation.fanText(for: temperatureOnly), "—")
+        XCTAssertEqual(MetricPresentation.fanStatus(for: temperatureOnly), "暂不可用")
+
+        let fanOnly: Reading<ThermalMetric> = .value(.init(
+            temperature: .unavailable("private temp key"), fan: .value(.rpm(1820))))
+        XCTAssertEqual(MetricPresentation.temperatureText(for: fanOnly), "—")
+        XCTAssertEqual(MetricPresentation.temperatureStatus(for: fanOnly), "暂不可用")
+        XCTAssertEqual(MetricPresentation.fanText(for: fanOnly), "1820 RPM")
+        XCTAssertEqual(MetricPresentation.fanStatus(for: fanOnly), "")
+        XCTAssertEqual(MetricPresentation.fanText(for: .value(.init(
+            temperature: .unavailable("missing"), fan: .value(.fanless)))), "无风扇")
+        XCTAssertEqual(MetricPresentation.fanText(for: .value(.init(
+            temperature: .value(40), fan: .value(.rpm(0))))), "0 RPM")
+
+        XCTAssertEqual(MetricPresentation.temperatureText(for: nil), "—")
+        XCTAssertEqual(MetricPresentation.fanText(for: nil), "—")
+        XCTAssertEqual(MetricPresentation.temperatureStatus(for: nil), "等待下一次采样")
+        XCTAssertEqual(MetricPresentation.fanStatus(for: nil), "等待下一次采样")
+        let disconnected: Reading<ThermalMetric> = .unavailable("connection failed")
+        XCTAssertEqual(MetricPresentation.temperatureText(for: disconnected), "—")
+        XCTAssertEqual(MetricPresentation.fanText(for: disconnected), "—")
+        XCTAssertEqual(MetricPresentation.temperatureStatus(for: disconnected), "暂不可用")
+        XCTAssertEqual(MetricPresentation.fanStatus(for: disconnected), "暂不可用")
     }
 }
 

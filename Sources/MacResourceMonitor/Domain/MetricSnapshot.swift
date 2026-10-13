@@ -5,6 +5,8 @@ enum Reading<Value: Sendable>: Sendable {
     case unavailable(String)
 }
 
+extension Reading: Equatable where Value: Equatable {}
+
 extension Reading {
     var value: Value? {
         guard case let .value(value) = self else { return nil }
@@ -34,8 +36,8 @@ enum FanMetric: Equatable, Sendable {
 }
 
 struct ThermalMetric: Equatable, Sendable {
-    let chipTemperatureCelsius: Double?
-    let fan: FanMetric
+    let temperature: Reading<Double>
+    let fan: Reading<FanMetric>
 }
 
 struct DiskMetric: Equatable, Sendable {
