@@ -1,0 +1,36 @@
+name: Intel validation
+
+on:
+  push:
+    branches: [ci/intel-validation]
+
+permissions:
+  contents: read
+
+jobs:
+  intel-validation:
+    runs-on: macos-15-intel
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+      - name: Verify commit and Intel host
+        run: |
+          set -euo pipefail
+          printf 'github.sha=%s\n' "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$(git rev-parse HEAD)"
+          uname -m
+          test "$(uname -m)" = x86_64
+          sw_vers
+          swift --version
+      - name: Check workflow safety
+        run: python3 -m unittest discover -s Tests/scripts -p 'test_*workflow.py'
+      - name: Run tests on Intel
+        run: swift test
+      - name: Build thin Intel release
+        run: swift build -c release --arch x86_64
+      - name: Verify thin Intel executable
+        run: |
+          set -euo pipefail
+          binary="$(swift build -c release --arch x86_64 --show-bin-path)/MacResourceMonitor"
+          test -x "$binary"
+          test "$(lipo -archs "$binary")" = x86_64
