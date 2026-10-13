@@ -6,10 +6,13 @@ app="$repo_root/dist/MacResourceMonitor.app"
 dmg="$repo_root/dist/MacResourceMonitor.dmg"
 dmg_root="$repo_root/build/dmg-root"
 
+# Never leave an old image that could be mistaken for this build.
+rm -f "$dmg"
 test -d "$app" || {
     printf 'Missing application; run scripts/build-app.sh first: %s\n' "$app" >&2
     exit 1
 }
+bash "$repo_root/scripts/verify-release.sh" --app-only
 
 rm -rf "$dmg_root"
 mkdir -p "$dmg_root"
