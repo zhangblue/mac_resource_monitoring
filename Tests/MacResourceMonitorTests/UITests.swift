@@ -103,6 +103,22 @@ final class UITests: XCTestCase {
         XCTAssertEqual(MenuBarPresentation.compactRate(.unavailable("read failed")), "—")
     }
 
+    // Process names and their values belong in cards and must not enter the menu bar.
+    func testMenuBarSnapshotKeepsOnlyFourTotalsWhenProcessRankingsExist() {
+        let entries: Reading<[ProcessRankingEntry]> = .value([
+            .init(identity: .init(pid: 101, startTimeMicroseconds: 10), name: "Chrome", value: 142.35)
+        ])
+        let snapshot = MetricSnapshot(
+            timestamp: Date(), cpuUsage: .value(0.24),
+            memory: .value(.init(usage: 0.61, usedBytes: 61, totalBytes: 100)),
+            network: .value(.init(downloadBytesPerSecond: 8_400_000, uploadBytesPerSecond: 1_200_000)),
+            thermal: .unavailable("not used"), disk: .unavailable("not used"),
+            processes: .init(cpu: entries, memory: entries, upload: entries, download: entries)
+        )
+
+        XCTAssertEqual(MenuBarPresentation(snapshot: snapshot).text, "C 24%   M 61%   ↑ 1.2M   ↓ 8.4M")
+    }
+
     func testMissingSnapshotAndInitialRatesUseDash() {
         XCTAssertEqual(MenuBarPresentation(snapshot: nil).text, "C —   M —   ↑ —   ↓ —")
         let snapshot = MetricSnapshot(

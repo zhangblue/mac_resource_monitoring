@@ -31,19 +31,23 @@ struct DashboardView: View {
                 MetricCardView(title: "CPU", value: percent(store.snapshot?.cpuUsage),
                                detail: MetricPresentation.status(for: store.snapshot?.cpuUsage, historyDuration: store.settings.historyDuration),
                                points: store.history.cpu.elements, sparklineStyle: .cpu,
-                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval)
+                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval,
+                               processes: store.snapshot?.processes.cpu, processStyle: .cpu)
                 MetricCardView(title: "内存", value: percent(store.snapshot?.memory.map(\.usage)),
                                detail: memoryDetail,
                                points: store.history.memory.elements, sparklineStyle: .memory,
-                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval)
+                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval,
+                               processes: store.snapshot?.processes.memory, processStyle: .memory)
                 MetricCardView(title: "上传", value: rate(store.snapshot?.network.value?.uploadBytesPerSecond),
                                detail: networkStatus(store.snapshot?.network.value?.uploadBytesPerSecond),
                                points: store.history.upload.elements, sparklineStyle: .upload,
-                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval)
+                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval,
+                               processes: store.snapshot?.processes.upload, processStyle: .upload)
                 MetricCardView(title: "下载", value: rate(store.snapshot?.network.value?.downloadBytesPerSecond),
                                detail: networkStatus(store.snapshot?.network.value?.downloadBytesPerSecond),
                                points: store.history.download.elements, sparklineStyle: .download,
-                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval)
+                               historyDuration: store.settings.historyDuration, refreshInterval: store.settings.refreshInterval,
+                               processes: store.snapshot?.processes.download, processStyle: .download)
                 MetricCardView(title: "芯片温度", value: temperature,
                                detail: MetricPresentation.temperatureStatus(for: store.snapshot?.thermal))
                 MetricCardView(title: "风扇", value: fan,

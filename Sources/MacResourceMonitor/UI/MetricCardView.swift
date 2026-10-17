@@ -8,6 +8,8 @@ struct MetricCardView: View {
     let sparklineStyle: SparklineStyle?
     let historyDuration: HistoryDuration?
     let refreshInterval: RefreshInterval?
+    let processes: Reading<[ProcessRankingEntry]>?
+    let processStyle: ProcessRankingStyle?
 
     init(title: String, value: String, detail: String) {
         self.title = title
@@ -17,10 +19,13 @@ struct MetricCardView: View {
         self.sparklineStyle = nil
         self.historyDuration = nil
         self.refreshInterval = nil
+        self.processes = nil
+        self.processStyle = nil
     }
 
     init(title: String, value: String, detail: String, points: [HistoryPoint], sparklineStyle: SparklineStyle,
-         historyDuration: HistoryDuration, refreshInterval: RefreshInterval) {
+         historyDuration: HistoryDuration, refreshInterval: RefreshInterval,
+         processes: Reading<[ProcessRankingEntry]>?, processStyle: ProcessRankingStyle) {
         self.title = title
         self.value = value
         self.detail = detail
@@ -28,6 +33,8 @@ struct MetricCardView: View {
         self.sparklineStyle = sparklineStyle
         self.historyDuration = historyDuration
         self.refreshInterval = refreshInterval
+        self.processes = processes
+        self.processStyle = processStyle
     }
 
     var body: some View {
@@ -45,6 +52,10 @@ struct MetricCardView: View {
                 SparklineView(points: points, style: sparklineStyle,
                               emptyMessage: detail == "暂不可用" ? "暂不可用" : "等待下一次采样",
                               historyDuration: historyDuration, refreshInterval: refreshInterval)
+            }
+            if let processStyle {
+                Divider()
+                ProcessRankingView(processes: processes, style: processStyle)
             }
             Text(detail)
                 .font(.caption2)

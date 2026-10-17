@@ -32,6 +32,12 @@ enum MetricFormatter {
         "\(integer(nonNegativeFinite(percentage)))%"
     }
 
+    static func processPercent(_ percentage: Double) -> String {
+        let value = nonNegativeFinite(percentage)
+        let rounded = value <= Double.greatestFiniteMagnitude / 10 ? (value * 10).rounded() / 10 : value
+        return String(format: "%.1f%%", rounded)
+    }
+
     static func rpm(_ revolutionsPerMinute: Double) -> String {
         "\(integer(nonNegativeFinite(revolutionsPerMinute))) RPM"
     }
