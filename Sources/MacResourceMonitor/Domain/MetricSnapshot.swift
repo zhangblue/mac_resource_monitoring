@@ -50,6 +50,19 @@ struct MetricSnapshot: Sendable {
     let network: Reading<NetworkMetric>
     let thermal: Reading<ThermalMetric>
     let disk: Reading<DiskMetric>
+    let processes: ProcessRankings
+
+    init(timestamp: Date, cpuUsage: Reading<Double>, memory: Reading<MemoryMetric>,
+         network: Reading<NetworkMetric>, thermal: Reading<ThermalMetric>, disk: Reading<DiskMetric>,
+         processes: ProcessRankings = .waiting()) {
+        self.timestamp = timestamp
+        self.cpuUsage = cpuUsage
+        self.memory = memory
+        self.network = network
+        self.thermal = thermal
+        self.disk = disk
+        self.processes = processes
+    }
 }
 
 struct HistoryPoint: Identifiable, Sendable {

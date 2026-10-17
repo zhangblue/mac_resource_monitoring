@@ -8,6 +8,161 @@ import XCTest
 @testable import MacResourceMonitor
 
 final class MonitoringEngineTests: XCTestCase {
+    // Omitting process collection or committing raw counters instead of rates must fail.
+    func testProcessRankingsPublishMemoryImmediatelyThenAdjacentRates() async {
+        let engine = processEngine(ProcessSequenceProvider())
+        let first = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        let second = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        XCTAssertTrue(first.processes.cpu.isUnavailable)
+        XCTAssertTrue(first.processes.download.isUnavailable)
+        XCTAssertEqual(first.processes.memory.value?.first?.value, 512 * 1_024 * 1_024)
+        XCTAssertEqual(second.processes.cpu.value?.first?.value ?? -1, 50, accuracy: 0.001)
+        XCTAssertEqual(second.processes.download.value?.first?.value, 1_000)
+        XCTAssertEqual(second.processes.upload.value?.first?.value, 2_000)
+        let history = await engine.history
+        XCTAssertEqual(history.cpu.count, 2)
+        XCTAssertEqual(history.memory.count, 2)
+        XCTAssertEqual(history.upload.count, 2)
+        XCTAssertEqual(history.download.count, 2)
+    }
+
+    // Sharing failure handling or baseline state between system and network must fail.
+    func testProcessSystemFailurePreservesNetworkAndTotals() async {
+        let engine = processEngine(ProcessSequenceProvider(systemFailures: [1]))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        let failed = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        XCTAssertTrue(failed.processes.cpu.isUnavailable)
+        XCTAssertTrue(failed.processes.memory.isUnavailable)
+        XCTAssertEqual(failed.processes.download.value?.first?.value, 1_000)
+        XCTAssertEqual(failed.processes.upload.value?.first?.value, 2_000)
+        XCTAssertEqual(failed.memory.value?.usedBytes, 500)
+        XCTAssertEqual(failed.disk.value?.usedBytes, 502)
+        let recovery = await engine.sample(at: Date(timeIntervalSince1970: 3))
+        XCTAssertTrue(recovery.processes.cpu.isUnavailable)
+        XCTAssertEqual(recovery.processes.memory.value?.first?.value, 512 * 1_024 * 1_024)
+        XCTAssertEqual(recovery.processes.download.value?.first?.value, 1_000)
+    }
+
+    func testProcessNetworkFailurePreservesCPUAndMemory() async {
+        let engine = processEngine(ProcessSequenceProvider(networkFailures: [1]))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        let failed = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        XCTAssertEqual(failed.processes.cpu.value?.first?.value, 50)
+        XCTAssertEqual(failed.processes.memory.value?.first?.value, 512 * 1_024 * 1_024)
+        XCTAssertTrue(failed.processes.upload.isUnavailable)
+        XCTAssertTrue(failed.processes.download.isUnavailable)
+        let recovery = await engine.sample(at: Date(timeIntervalSince1970: 3))
+        XCTAssertEqual(recovery.processes.cpu.value?.first?.value, 50)
+        XCTAssertTrue(recovery.processes.download.isUnavailable)
+    }
+
+    // Keeping either process delta baseline after changing cadence must fail.
+    func testRefreshChangeResetsProcessRatesWithoutDiscardingTotalHistory() async {
+        let engine = processEngine(ProcessSequenceProvider())
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        await engine.updateConfiguration(.init(refreshInterval: .threeSeconds, historyDuration: .fiveMinutes))
+        let baseline = await engine.sample(at: Date(timeIntervalSince1970: 5))
+        XCTAssertTrue(baseline.processes.cpu.isUnavailable)
+        XCTAssertTrue(baseline.processes.download.isUnavailable)
+        XCTAssertTrue(baseline.processes.upload.isUnavailable)
+        XCTAssertEqual(baseline.processes.memory.value?.first?.value, 512 * 1_024 * 1_024)
+        let next = await engine.sample(at: Date(timeIntervalSince1970: 8))
+        XCTAssertEqual(next.processes.cpu.value?.first?.value ?? -1, 50.0 / 3, accuracy: 0.001)
+        XCTAssertEqual(next.processes.download.value?.first?.value ?? -1, 1_000.0 / 3, accuracy: 0.001)
+        let history = await engine.history
+        XCTAssertEqual(history.cpu.count, 4)
+    }
+
+    // Returning before cancellation drains, or carrying rates across stop, must fail.
+    func testStopWaitsForProcessCancellationAndRestartRebuildsRates() async throws {
+        let process = ProcessSequenceProvider(gateCancellation: true)
+        let engine = processEngine(process)
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        let finished = CompletionFlag()
+        let stopping = Task { await engine.stop(); await finished.finish() }
+        let reachedCancellation = await MonitoringChecks.waitUntil { await process.isCancelling }
+        let returnedEarly = await finished.completed
+        await process.releaseCancellation()
+        await stopping.value
+        XCTAssertTrue(reachedCancellation)
+        XCTAssertFalse(returnedEarly)
+        let baseline = await engine.sample(at: Date(timeIntervalSince1970: 3))
+        XCTAssertTrue(baseline.processes.cpu.isUnavailable)
+        XCTAssertTrue(baseline.processes.download.isUnavailable)
+        let next = await engine.sample(at: Date(timeIntervalSince1970: 4))
+        XCTAssertEqual(next.processes.cpu.value?.first?.value, 50)
+        XCTAssertEqual(next.processes.download.value?.first?.value, 1_000)
+    }
+
+    // A late process read must neither seed the restarted calculator nor reach diagnostics.
+    func testLateProcessResultCannotCommitOrLogAfterStop() async {
+        let process = ProcessSequenceProvider(systemFailures: [2], networkFailures: [2], gatedSample: 2)
+        let logger = ProcessDiagnosticRecorder()
+        let engine = processEngine(process, logger: logger)
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        let pending = Task { await engine.sample(at: Date(timeIntervalSince1970: 3)) }
+        let blocked = await MonitoringChecks.waitUntil { await process.isSampling }
+        await engine.stop()
+        let baseline = await engine.sample(at: Date(timeIntervalSince1970: 4))
+        await process.releaseSample()
+        let discarded = await pending.value
+        let drained = await MonitoringChecks.waitUntil { await logger.events.count == 21 }
+        let events = await logger.events
+        let history = await engine.history
+        XCTAssertTrue(blocked)
+        XCTAssertTrue(baseline.processes.cpu.isUnavailable)
+        XCTAssertTrue(baseline.processes.upload.isUnavailable)
+        XCTAssertTrue(discarded.processes.memory.isUnavailable)
+        XCTAssertTrue(drained)
+        XCTAssertFalse(events.contains { $0.date == Date(timeIntervalSince1970: 3) })
+        XCTAssertEqual(history.cpu.elements.map(\.timestamp.timeIntervalSince1970), [1, 2, 4])
+        let next = await engine.sample(at: Date(timeIntervalSince1970: 5))
+        XCTAssertEqual(next.processes.cpu.value?.first?.value, 50)
+        XCTAssertEqual(next.processes.download.value?.first?.value, 1_000)
+    }
+
+    // The two process failures must be recorded independently and successes clear each state.
+    func testProcessDiagnosticsReportIndependentFailureAndRecovery() async {
+        let logger = ProcessDiagnosticRecorder()
+        let engine = processEngine(ProcessSequenceProvider(systemFailures: [0], networkFailures: [1]), logger: logger)
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 3))
+        let drained = await MonitoringChecks.waitUntil { await logger.events.count == 21 }
+        let events = await logger.events
+        let system = events.filter { $0.component == .processSystem }.map(\.failure)
+        let network = events.filter { $0.component == .processNetwork }.map(\.failure)
+        XCTAssertTrue(drained)
+        XCTAssertEqual(system, ["processListFailed", nil, nil])
+        XCTAssertEqual(network, [nil, "nettopTimedOut", nil])
+    }
+
+    func testProcessDiagnosticCategoriesAreSafeDeduplicatedAndRecoverable() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("diagnostics.log")
+        let logger = DiagnosticLogger(logURL: url)
+        let categories = ["processListFailed", "nettopLaunchFailed", "nettopTimedOut",
+                          "nettopOutputTooLarge", "nettopExitFailed", "nettopInvalidCSV"]
+        for category in categories {
+            let component: DiagnosticComponent = category == "processListFailed" ? .processSystem : .processNetwork
+            let failure = "\(category)(/Users/private/secret-process)"
+            try await logger.record(component: component, failure: failure, at: Date(timeIntervalSince1970: 1))
+            try await logger.record(component: component, failure: failure, at: Date(timeIntervalSince1970: 2))
+            try await logger.record(component: component, failure: nil, at: Date(timeIntervalSince1970: 3))
+            try await logger.record(component: component, failure: failure, at: Date(timeIntervalSince1970: 4))
+        }
+        let contents = try String(contentsOf: url, encoding: .utf8)
+        let lines = contents.split(separator: "\n")
+        XCTAssertEqual(lines.count, 12)
+        for category in categories { XCTAssertEqual(lines.filter { $0.hasSuffix(" \(category)") }.count, 2) }
+        XCTAssertFalse(contents.contains("secret-process"))
+        XCTAssertFalse(contents.contains("/Users/"))
+    }
+
     func testFirstCPUIsUnavailableThenUsesRealDelta() async throws { try await MonitoringChecks.cpuBaseline() }
     func testPendingStopRestartRejectsOldResult() async throws { try await MonitoringChecks.pendingRestart() }
     func testConcurrentExplicitSamplesKeepOwnTimestamps() async throws { try await MonitoringChecks.concurrentSamples() }
@@ -232,6 +387,65 @@ private actor CompletionFlag {
     func finish() { completed = true }
 }
 
+private actor ProcessDiagnosticRecorder: DiagnosticLogging {
+    struct Event: Sendable {
+        let component: DiagnosticComponent
+        let failure: String?
+        let date: Date
+    }
+    private(set) var events: [Event] = []
+    func record(component: DiagnosticComponent, failure: String?, at date: Date) {
+        events.append(.init(component: component, failure: failure, date: date))
+    }
+}
+
+private actor ProcessSequenceProvider: ProcessMetricsProviding {
+    private let systemFailures: Set<Int>
+    private let networkFailures: Set<Int>
+    private let gatedSample: Int?
+    private let gateCancellation: Bool
+    private var step = 0
+    private var sampleGate: CheckedContinuation<Void, Never>?
+    private var cancellationGate: CheckedContinuation<Void, Never>?
+    var isSampling: Bool { sampleGate != nil }
+    var isCancelling: Bool { cancellationGate != nil }
+
+    init(systemFailures: Set<Int> = [], networkFailures: Set<Int> = [],
+         gatedSample: Int? = nil, gateCancellation: Bool = false) {
+        self.systemFailures = systemFailures
+        self.networkFailures = networkFailures
+        self.gatedSample = gatedSample
+        self.gateCancellation = gateCancellation
+    }
+
+    func sample() async -> ProcessRawSnapshot {
+        let current = step
+        step += 1
+        if current == gatedSample { await withCheckedContinuation { sampleGate = $0 } }
+        let identity = ProcessIdentity(pid: 42, startTimeMicroseconds: 100)
+        return .init(system: systemFailures.contains(current) ? .unavailable("processListFailed") : .value([
+            .init(identity: identity, name: "Editor", cpuNanoseconds: UInt64(current) * 500_000_000,
+                  residentBytes: 536_870_912)
+        ]), network: networkFailures.contains(current) ? .unavailable("nettopTimedOut") : .value([
+            .init(identity: identity, name: "Editor", receivedBytes: UInt64(current) * 1_000,
+                  sentBytes: UInt64(current) * 2_000)
+        ]))
+    }
+
+    func cancel() async {
+        if gateCancellation { await withCheckedContinuation { cancellationGate = $0 } }
+    }
+    func releaseCancellation() { cancellationGate?.resume(); cancellationGate = nil }
+    func releaseSample() { sampleGate?.resume(); sampleGate = nil }
+}
+
+private func processEngine(_ process: any ProcessMetricsProviding,
+                           logger: any DiagnosticLogging = SilentDiagnosticLogger()) -> MonitoringEngine {
+    MonitoringEngine(providers: ProviderSet(cpu: AdvancingCPUProvider(), memory: FakeMemoryProvider(fails: false),
+        network: FakeNetworkProvider(), disk: FakeDiskProvider(), sensors: FakeSensorProvider(), processes: process),
+        logger: logger)
+}
+
 private actor UpdateRecorder {
     private(set) var values: [MonitoringUpdate] = []
     private(set) var finished = false
@@ -364,14 +578,14 @@ private enum MonitoringChecks {
         let snapshots = await (first.value, second.value)
         try require(snapshots.0.timestamp == firstDate && snapshots.1.timestamp == secondDate,
                     "Nonblocking logging preserves sample results")
-        let drained = await waitUntil { await logger.events.count == 10 }
+        let drained = await waitUntil { await logger.events.count == 14 }
         try require(drained, "Committed log queue drains after release, including after stop")
         let events = await logger.events
-        try require(events.map(\.0) == [.cpu, .memory, .network, .disk, .sensors,
-                                        .cpu, .memory, .network, .disk, .sensors],
-                    "Each sample logs five components in order")
-        try require(events.map(\.1) == Array(repeating: firstDate, count: 5)
-                    + Array(repeating: secondDate, count: 5),
+        try require(events.map(\.0) == [.cpu, .memory, .network, .disk, .sensors, .processSystem, .processNetwork,
+                                        .cpu, .memory, .network, .disk, .sensors, .processSystem, .processNetwork],
+                    "Each sample logs seven components in order")
+        try require(events.map(\.1) == Array(repeating: firstDate, count: 7)
+                    + Array(repeating: secondDate, count: 7),
                     "Log events preserve sample commit order")
     }
 
@@ -394,7 +608,7 @@ private enum MonitoringChecks {
         let update = await received.value
         try require(entered && publishedBeforeRelease && update != nil,
                     "Stream publishes committed sample before logger is released")
-        let drained = await waitUntil { await logger.events.count == 5 }
+        let drained = await waitUntil { await logger.events.count == 7 }
         try require(drained, "Stream sample remains queued for logging after stop")
     }
 
@@ -421,7 +635,7 @@ private enum MonitoringChecks {
         engine = nil
         let released = weakEngine == nil
         await logger.release()
-        let drained = await waitUntil { await logger.events.count == 5 }
+        let drained = await waitUntil { await logger.events.count == 7 }
         try require(entered && released && drained,
                     "Queued diagnostics finish without retaining or blocking engine deinit")
     }
@@ -469,17 +683,17 @@ private enum MonitoringChecks {
                                       logger: logger)
         let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
         let history = await engine.history
-        let logged = await waitUntil { await logger.callCount == 5 }
+        let logged = await waitUntil { await logger.callCount == 7 }
         let calls = await logger.callCount
         let outcomes = await logger.outcomes
         try require(snapshot.memory.isUnavailable && snapshot.disk.value?.usedBytes == 501,
                     "Logging failure does not change readings")
         try require(history.cpu.count == 1, "Logging failure does not discard committed history")
         try require(logged, "Failed logger attempts eventually finish")
-        try require(calls == 5, "Every collector outcome reaches logger after commit")
-        try require(outcomes.map(\.0) == [.cpu, .memory, .network, .disk, .sensors],
+        try require(calls == 7, "Every collector outcome reaches logger after commit")
+        try require(outcomes.map(\.0) == [.cpu, .memory, .network, .disk, .sensors, .processSystem, .processNetwork],
                     "Engine reports each collector under its own component")
-        try require(outcomes.map(\.1) == [false, true, false, false, false],
+        try require(outcomes.map(\.1) == [false, true, false, false, false, false, false],
                     "Raw provider failures are logged; derived CPU baseline is not")
     }
 
@@ -809,12 +1023,12 @@ private enum MonitoringChecks {
             processes: FakeProcessMetricsProvider()
         ), logger: logger)
         let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
-        let logged = await waitUntil { await logger.callCount == 5 }
+        let logged = await waitUntil { await logger.callCount == 7 }
         let outcomes = await logger.outcomes
         try require(snapshot.disk.isUnavailable, "Failed disk capacity read becomes unavailable")
         try require(snapshot.memory.value?.usedBytes == 500 && snapshot.thermal.value?.fan == .fanless,
                     "Disk failure leaves independent metrics available")
-        try require(logged && outcomes.map(\.1) == [false, false, false, true, false],
+        try require(logged && outcomes.map(\.1) == [false, false, false, true, false, false, false],
                     "Diagnostic log marks only disk collection as failed")
     }
 

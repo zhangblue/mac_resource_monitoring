@@ -1,7 +1,7 @@
 import Foundation
 
 enum DiagnosticComponent: String, Sendable {
-    case cpu, memory, network, disk, sensors
+    case cpu, memory, network, disk, sensors, processSystem, processNetwork
 }
 
 protocol DiagnosticLogging: Sendable {
@@ -20,7 +20,8 @@ actor DiagnosticLogger: DiagnosticLogging {
         "capacityUnavailable", "unsupportedType", "insufficientBytes", "invalidKey",
         "invalidLayout", "serviceUnavailable", "ioFailure", "deviceFailure",
         "invalidResponseSize", "invalidDataSize", "invalidKeyCount",
-        "invalidFanCount", "invalidFanSpeed"
+        "invalidFanCount", "invalidFanSpeed", "processListFailed", "nettopLaunchFailed",
+        "nettopTimedOut", "nettopOutputTooLarge", "nettopExitFailed", "nettopInvalidCSV"
     ]
 
     private let logURL: URL

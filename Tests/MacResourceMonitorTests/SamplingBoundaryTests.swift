@@ -35,8 +35,17 @@ enum SamplingBoundaryHarness {
 }
 #endif
 
-private struct BoundaryProcessMetricsProvider: ProcessMetricsProviding {
-    func sample() async -> ProcessRawSnapshot { .init(system: .value([]), network: .value([])) }
+private actor BoundaryProcessMetricsProvider: ProcessMetricsProviding {
+    private var step: UInt64 = 0
+    func sample() async -> ProcessRawSnapshot {
+        step += 1
+        let identity = ProcessIdentity(pid: 7, startTimeMicroseconds: 100)
+        return .init(system: .value([
+            .init(identity: identity, name: "Browser", cpuNanoseconds: step * 500_000_000, residentBytes: 1_024)
+        ]), network: .value([
+            .init(identity: identity, name: "Browser", receivedBytes: step * 1_000, sentBytes: step * 2_000)
+        ]))
+    }
     func cancel() async {}
 }
 
@@ -105,16 +114,27 @@ private enum BoundaryChecks {
         _ = await engine.sample(at: base)
         let active = await engine.sample(at: base.addingTimeInterval(1))
         try checkBoundary(active.network.value?.downloadBytesPerSecond == 100, "Adjacent rate must be 100 B/s")
+        try checkBoundary(active.processes.cpu.value?.first?.value == 50, "Adjacent process CPU must use 500 ms delta")
+        try checkBoundary(active.processes.download.value?.first?.value == 1_000, "Adjacent process download is 1,000 B/s")
         let center = NSWorkspace.shared.notificationCenter
         center.post(name: NSWorkspace.willSleepNotification, object: nil)
         center.post(name: NSWorkspace.didWakeNotification, object: nil)
         let waking = await engine.sample(at: base.addingTimeInterval(3))
         try checkBoundary(waking.network.value?.downloadBytesPerSecond == nil,
                           "First sample after a 2-second sleep must rebuild the network baseline")
+        try checkBoundary(waking.processes.cpu.isUnavailable && waking.processes.download.isUnavailable
+                          && waking.processes.upload.isUnavailable,
+                          "A sleep generation change must rebuild all process rate baselines")
+        try checkBoundary(waking.processes.memory.value?.first?.value == 1_024,
+                          "Process memory remains available immediately after wake")
         let resumed = await engine.sample(at: base.addingTimeInterval(4))
         try checkBoundary(resumed.network.value?.downloadBytesPerSecond == 100,
                           "Second wake sample must restore adjacent network rate")
         try checkBoundary(resumed.network.value?.uploadBytesPerSecond == 20, "Upload baseline also resets")
+        try checkBoundary(resumed.processes.cpu.value?.first?.value == 50
+                          && resumed.processes.download.value?.first?.value == 1_000
+                          && resumed.processes.upload.value?.first?.value == 2_000,
+                          "Process rates resume from adjacent post-wake counters")
         await engine.stop()
     }
 
@@ -140,6 +160,7 @@ private enum BoundaryChecks {
         await network.release()
         let discarded = await pending.value
         try checkBoundary(discarded.network.isUnavailable, "An in-flight pre-sleep read must be discarded")
+        try checkBoundary(discarded.processes.memory.isUnavailable, "Discarded process reads cannot publish memory")
         let sleeping = await engine!.sample(at: base.addingTimeInterval(2))
         try checkBoundary(sleeping.network.isUnavailable, "No delta collection while sleeping")
         let historyCount = await engine!.history.download.count
@@ -147,11 +168,18 @@ private enum BoundaryChecks {
         center.post(name: NSWorkspace.didWakeNotification, object: nil)
         let baseline = await engine!.sample(at: base.addingTimeInterval(3))
         try checkBoundary(baseline.network.value?.downloadBytesPerSecond == nil, "Discarded read cannot seed wake baseline")
+        try checkBoundary(baseline.processes.cpu.isUnavailable && baseline.processes.download.isUnavailable,
+                          "Discarded process reads cannot seed post-wake baselines")
         let recovered = await engine!.sample(at: base.addingTimeInterval(4))
         try checkBoundary(recovered.network.value?.downloadBytesPerSecond == 100, "Adjacent sampling resumes after in-flight sleep")
+        try checkBoundary(recovered.processes.cpu.value?.first?.value == 50
+                          && recovered.processes.download.value?.first?.value == 1_000,
+                          "Process rates resume after discarding the pre-sleep collection")
         center.post(name: NSWorkspace.didWakeNotification, object: nil)
         let wakeOnly = await engine!.sample(at: base.addingTimeInterval(5))
         try checkBoundary(wakeOnly.network.value?.downloadBytesPerSecond == nil, "Wake alone also invalidates baseline")
+        try checkBoundary(wakeOnly.processes.cpu.isUnavailable && wakeOnly.processes.upload.isUnavailable,
+                          "A wake-only generation change also resets process baselines")
         await engine!.stop()
         engine = nil
         try checkBoundary(weakMonitor == nil, "Engine and workspace callbacks must release the sleep monitor")

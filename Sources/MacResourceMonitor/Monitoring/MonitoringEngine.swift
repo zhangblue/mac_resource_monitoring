@@ -56,6 +56,7 @@ actor MonitoringEngine {
     private var baselineSleepGeneration: UUID?
     private var previousCPU: CPUTicks?
     private var networkCalculator = NetworkRateCalculator()
+    private var processCalculator = ProcessRankingCalculator()
     private var loop: Task<Void, Never>?
     private var intervalWait: Task<Void, Never>?
     private var intervalWaitID: UUID?
@@ -117,7 +118,7 @@ actor MonitoringEngine {
         }
     }
 
-    func stop() {
+    func stop() async {
         generation = UUID()
         loop?.cancel()
         loop = nil
@@ -129,9 +130,11 @@ actor MonitoringEngine {
         samplingID = nil
         previousCPU = nil
         networkCalculator = NetworkRateCalculator()
+        processCalculator.resetRates()
         let continuations = Array(subscribers.values)
         subscribers.removeAll()
         continuations.forEach { $0.finish() }
+        await providers.processes.cancel()
     }
 
     func updateConfiguration(_ newValue: MonitoringConfiguration) {
@@ -145,7 +148,10 @@ actor MonitoringEngine {
                 subscribers.values.forEach { $0.yield(update) }
             }
         }
-        if intervalChanged { intervalWait?.cancel() }
+        if intervalChanged {
+            processCalculator.resetRates()
+            intervalWait?.cancel()
+        }
     }
 
     private func makeIntervalWait(startedAt start: ContinuousClock.Instant, generation token: UUID)
@@ -220,9 +226,9 @@ actor MonitoringEngine {
                        thermal: .unavailable("采样已取消"), disk: .unavailable("采样已取消"))
     }
 
-    private func removeSubscriber(_ id: UUID) {
+    private func removeSubscriber(_ id: UUID) async {
         guard subscribers.removeValue(forKey: id) != nil else { return }
-        if subscribers.isEmpty { stop() }
+        if subscribers.isEmpty { await stop() }
     }
 
     private static func read<Value: Sendable>(
@@ -232,8 +238,14 @@ actor MonitoringEngine {
         catch { return .unavailable(String(describing: error)) }
     }
 
-    private typealias ProviderReadings = (Reading<CPUTicks>, Reading<MemoryMetric>, Reading<NetworkCounters>,
-                                         Reading<DiskMetric>, Reading<ThermalMetric>)
+    private struct ProviderReadings: Sendable {
+        let cpu: Reading<CPUTicks>
+        let memory: Reading<MemoryMetric>
+        let network: Reading<NetworkCounters>
+        let disk: Reading<DiskMetric>
+        let thermal: Reading<ThermalMetric>
+        let processes: ProcessRawSnapshot
+    }
 
     private static func collect(_ providers: ProviderSet) async -> ProviderReadings {
         async let cpu = Self.read { try await providers.cpu.sample() }
@@ -241,7 +253,9 @@ actor MonitoringEngine {
         async let network = Self.read { try await providers.network.sample() }
         async let disk = Self.read { try await providers.disk.sample() }
         async let thermal = Self.read { try await providers.sensors.sample() }
-        return await (cpu, memory, network, disk, thermal)
+        async let processes = providers.processes.sample()
+        return await ProviderReadings(cpu: cpu, memory: memory, network: network,
+                                      disk: disk, thermal: thermal, processes: processes)
     }
 
     private func commit(_ readings: ProviderReadings, at date: Date,
@@ -255,12 +269,15 @@ actor MonitoringEngine {
         if baselineSleepGeneration != sleepState.generation {
             previousCPU = nil
             networkCalculator = NetworkRateCalculator()
+            processCalculator.resetRates()
             baselineSleepGeneration = sleepState.generation
         }
 
-        let snapshot = MetricSnapshot(timestamp: date, cpuUsage: cpuUsage(readings.0),
-                                      memory: readings.1, network: networkMetric(readings.2, at: date),
-                                      thermal: readings.4, disk: readings.3)
+        let processes = processCalculator.update(system: readings.processes.system,
+                                                network: readings.processes.network, at: date)
+        let snapshot = MetricSnapshot(timestamp: date, cpuUsage: cpuUsage(readings.cpu),
+                                      memory: readings.memory, network: networkMetric(readings.network, at: date),
+                                      thermal: readings.thermal, disk: readings.disk, processes: processes)
         history.append(snapshot)
         latestSnapshot = snapshot
         enqueueDiagnostics(readings, at: date)
@@ -278,11 +295,13 @@ actor MonitoringEngine {
 
     nonisolated private static func recordDiagnostics(_ readings: ProviderReadings, at date: Date,
                                                       logger: any DiagnosticLogging) async {
-        await record(.cpu, reading: readings.0, at: date, logger: logger)
-        await record(.memory, reading: readings.1, at: date, logger: logger)
-        await record(.network, reading: readings.2, at: date, logger: logger)
-        await record(.disk, reading: readings.3, at: date, logger: logger)
-        await record(.sensors, reading: readings.4, at: date, logger: logger)
+        await record(.cpu, reading: readings.cpu, at: date, logger: logger)
+        await record(.memory, reading: readings.memory, at: date, logger: logger)
+        await record(.network, reading: readings.network, at: date, logger: logger)
+        await record(.disk, reading: readings.disk, at: date, logger: logger)
+        await record(.sensors, reading: readings.thermal, at: date, logger: logger)
+        await record(.processSystem, reading: readings.processes.system, at: date, logger: logger)
+        await record(.processNetwork, reading: readings.processes.network, at: date, logger: logger)
     }
 
     nonisolated private static func record<Value>(_ component: DiagnosticComponent, reading: Reading<Value>,

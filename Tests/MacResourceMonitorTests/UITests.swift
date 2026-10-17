@@ -112,6 +112,10 @@ final class UITests: XCTestCase {
             thermal: .unavailable("not used"), disk: .unavailable("not used")
         )
         XCTAssertEqual(MenuBarPresentation(snapshot: snapshot).text, "C —   M 61%   ↑ —   ↓ —")
+        XCTAssertTrue(snapshot.processes.cpu.isUnavailable)
+        XCTAssertTrue(snapshot.processes.memory.isUnavailable)
+        XCTAssertTrue(snapshot.processes.upload.isUnavailable)
+        XCTAssertTrue(snapshot.processes.download.isUnavailable)
     }
 
     func testSparklineMissingPointBreaksLine() {
