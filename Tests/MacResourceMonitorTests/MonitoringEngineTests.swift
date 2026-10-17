@@ -1,4 +1,8 @@
 import Foundation
+private struct FakeProcessMetricsProvider: ProcessMetricsProviding {
+    func sample() async -> ProcessRawSnapshot { .init(system: .value([]), network: .value([])) }
+    func cancel() async {}
+}
 #if !MONITORING_ENGINE_HARNESS
 import XCTest
 @testable import MacResourceMonitor
@@ -483,7 +487,7 @@ private enum MonitoringChecks {
                           sensors: any SensorProviding = FakeSensorProvider(),
                           cpu: any CPUProviding = FakeCPUProvider()) -> ProviderSet {
         ProviderSet(cpu: cpu, memory: memory, network: FakeNetworkProvider(),
-                    disk: FakeDiskProvider(), sensors: sensors)
+                    disk: FakeDiskProvider(), sensors: sensors, processes: FakeProcessMetricsProvider())
     }
 
     static func makeEngine(providers: ProviderSet,
@@ -762,7 +766,8 @@ private enum MonitoringChecks {
         try require(stopped.thermal.value?.fan == .rpm(0), "Zero RPM is distinct from fanless")
         let failedCounters = makeEngine(providers: ProviderSet(
             cpu: FakeCPUProvider(result: .failure(.failed)), memory: FakeMemoryProvider(fails: false),
-            network: FakeNetworkProvider(fails: true), disk: FailingDiskProvider(), sensors: FakeSensorProvider()
+            network: FakeNetworkProvider(fails: true), disk: FailingDiskProvider(), sensors: FakeSensorProvider(),
+            processes: FakeProcessMetricsProvider()
         ))
         let counters = await failedCounters.sample(at: Date())
         try require(counters.cpuUsage.isUnavailable && counters.network.isUnavailable && counters.disk.isUnavailable,
@@ -800,7 +805,8 @@ private enum MonitoringChecks {
         let logger = FailingDiagnosticLogger()
         let engine = MonitoringEngine(providers: ProviderSet(
             cpu: AdvancingCPUProvider(), memory: FakeMemoryProvider(fails: false),
-            network: FakeNetworkProvider(), disk: FailingDiskProvider(), sensors: FakeSensorProvider()
+            network: FakeNetworkProvider(), disk: FailingDiskProvider(), sensors: FakeSensorProvider(),
+            processes: FakeProcessMetricsProvider()
         ), logger: logger)
         let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
         let logged = await waitUntil { await logger.callCount == 5 }

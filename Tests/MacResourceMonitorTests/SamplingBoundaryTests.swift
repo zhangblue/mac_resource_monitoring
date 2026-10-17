@@ -35,6 +35,11 @@ enum SamplingBoundaryHarness {
 }
 #endif
 
+private struct BoundaryProcessMetricsProvider: ProcessMetricsProviding {
+    func sample() async -> ProcessRawSnapshot { .init(system: .value([]), network: .value([])) }
+    func cancel() async {}
+}
+
 private enum BoundaryError: Error { case assertion(String) }
 private func checkBoundary(_ condition: Bool, _ message: String) throws {
     if !condition { throw BoundaryError.assertion(message) }
@@ -94,7 +99,8 @@ private enum BoundaryChecks {
     // Synthetic workspace notifications exercise the real observer wiring without sleeping this Mac.
     static func shortSleep() async throws {
         let engine = MonitoringEngine(providers: ProviderSet(cpu: BoundaryCPU(), memory: BoundaryMemory(),
-            network: BoundaryNetwork(), disk: BoundaryDisk(), sensors: BoundarySensors()), logger: BoundaryLogger())
+            network: BoundaryNetwork(), disk: BoundaryDisk(), sensors: BoundarySensors(),
+            processes: BoundaryProcessMetricsProvider()), logger: BoundaryLogger())
         let base = Date(timeIntervalSince1970: 1_000)
         _ = await engine.sample(at: base)
         let active = await engine.sample(at: base.addingTimeInterval(1))
@@ -118,7 +124,8 @@ private enum BoundaryChecks {
         weak var weakMonitor = monitor
         let network = BoundaryGatedNetwork()
         var engine: MonitoringEngine? = MonitoringEngine(providers: ProviderSet(cpu: BoundaryCPU(),
-            memory: BoundaryMemory(), network: network, disk: BoundaryDisk(), sensors: BoundarySensors()),
+            memory: BoundaryMemory(), network: network, disk: BoundaryDisk(), sensors: BoundarySensors(),
+            processes: BoundaryProcessMetricsProvider()),
             logger: BoundaryLogger(), sleepMonitor: monitor!)
         monitor = nil
         let base = Date(timeIntervalSince1970: 2_000)

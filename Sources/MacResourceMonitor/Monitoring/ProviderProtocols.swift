@@ -20,6 +20,11 @@ protocol SensorProviding: Sendable {
     func sample() async throws -> ThermalMetric
 }
 
+protocol ProcessMetricsProviding: Sendable {
+    func sample() async -> ProcessRawSnapshot
+    func cancel() async
+}
+
 extension NetworkProvider: NetworkProviding {}
 extension DiskProvider: DiskProviding {}
 extension AppleSiliconSensorProvider: SensorProviding {}
@@ -30,10 +35,11 @@ struct ProviderSet: Sendable {
     let network: any NetworkProviding
     let disk: any DiskProviding
     let sensors: any SensorProviding
+    let processes: any ProcessMetricsProviding
 
     static var live: ProviderSet {
         ProviderSet(cpu: CPUProvider(), memory: MemoryProvider(), network: NetworkProvider(),
-                    disk: DiskProvider(), sensors: SystemSensorProvider())
+                    disk: DiskProvider(), sensors: SystemSensorProvider(), processes: ProcessMetricsProvider())
     }
 }
 
