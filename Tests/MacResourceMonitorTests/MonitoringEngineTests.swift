@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 private struct FakeProcessMetricsProvider: ProcessMetricsProviding {
     func sample() async -> ProcessRawSnapshot { .init(system: .value([]), network: .value([])) }
     func cancel() async {}
@@ -8,6 +9,61 @@ import XCTest
 @testable import MacResourceMonitor
 
 final class MonitoringEngineTests: XCTestCase {
+    // Sleep must actively cancel collection and drain cleanup before either the
+    // abandoned result returns or a post-wake collection starts.
+    func testSleepCancelsProcessSamplingAndAwaitsCleanupBeforeWakeSampling() async throws {
+        let center = NotificationCenter()
+        let process = ProcessSequenceProvider(systemFailures: [2], networkFailures: [2],
+                                              gatedSample: 2, gateCancellation: true)
+        let logger = ProcessDiagnosticRecorder()
+        let engine = processEngine(process, logger: logger, sleepMonitor: SystemSleepMonitor(center: center))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        let finished = CompletionFlag()
+        let pending = Task {
+            let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 3))
+            await finished.finish()
+            return snapshot
+        }
+        let entered = await MonitoringChecks.waitUntil { await process.isSampling }
+        XCTAssertTrue(entered)
+        center.post(name: NSWorkspace.willSleepNotification, object: nil)
+        let cancelling = await MonitoringChecks.waitUntil { await process.isCancelling }
+        XCTAssertTrue(cancelling, "willSleep must actively cancel the process provider")
+        await process.releaseSample()
+        center.post(name: NSWorkspace.didWakeNotification, object: nil)
+        let baselineTask = Task { await engine.sample(at: Date(timeIntervalSince1970: 4)) }
+        try await Task.sleep(for: .milliseconds(50))
+        let returnedBeforeCleanup = await finished.completed
+        let collectionsBeforeCleanup = await process.sampleCount
+        await process.releaseCancellation()
+        let discarded = await pending.value
+        let baseline = await baselineTask.value
+        let cancelledSamples = await process.cancelledSamples
+        XCTAssertFalse(returnedBeforeCleanup, "The cancelled collection must await provider cleanup")
+        XCTAssertTrue(cancelledSamples.contains(2), "Sleep must cancel the in-flight task, including child work still starting")
+        XCTAssertEqual(collectionsBeforeCleanup, 3, "No post-wake process can start before cleanup drains")
+        XCTAssertTrue(discarded.processes.memory.isUnavailable)
+        XCTAssertTrue(baseline.cpuUsage.isUnavailable)
+        XCTAssertNil(baseline.network.value?.downloadBytesPerSecond)
+        XCTAssertTrue(baseline.processes.cpu.isUnavailable)
+        XCTAssertTrue(baseline.processes.download.isUnavailable)
+        XCTAssertTrue(baseline.processes.upload.isUnavailable)
+        XCTAssertEqual(baseline.processes.memory.value?.first?.value, 536_870_912)
+        let next = await engine.sample(at: Date(timeIntervalSince1970: 5))
+        XCTAssertNotNil(next.cpuUsage.value)
+        XCTAssertNotNil(next.network.value?.downloadBytesPerSecond)
+        XCTAssertEqual(next.processes.cpu.value?.first?.value, 50)
+        XCTAssertEqual(next.processes.download.value?.first?.value, 1_000)
+        XCTAssertEqual(next.processes.upload.value?.first?.value, 2_000)
+        let drained = await MonitoringChecks.waitUntil { await logger.events.count == 28 }
+        let events = await logger.events
+        let history = await engine.history
+        XCTAssertTrue(drained)
+        XCTAssertFalse(events.contains { $0.date == Date(timeIntervalSince1970: 3) })
+        XCTAssertEqual(history.cpu.elements.map(\.timestamp.timeIntervalSince1970), [1, 2, 4, 5])
+    }
+
     // Omitting process collection or committing raw counters instead of rates must fail.
     func testProcessRankingsPublishMemoryImmediatelyThenAdjacentRates() async {
         let engine = processEngine(ProcessSequenceProvider())
@@ -405,10 +461,12 @@ private actor ProcessSequenceProvider: ProcessMetricsProviding {
     private let gatedSample: Int?
     private let gateCancellation: Bool
     private var step = 0
+    private(set) var cancelledSamples: Set<Int> = []
     private var sampleGate: CheckedContinuation<Void, Never>?
     private var cancellationGate: CheckedContinuation<Void, Never>?
     var isSampling: Bool { sampleGate != nil }
     var isCancelling: Bool { cancellationGate != nil }
+    var sampleCount: Int { step }
 
     init(systemFailures: Set<Int> = [], networkFailures: Set<Int> = [],
          gatedSample: Int? = nil, gateCancellation: Bool = false) {
@@ -422,6 +480,7 @@ private actor ProcessSequenceProvider: ProcessMetricsProviding {
         let current = step
         step += 1
         if current == gatedSample { await withCheckedContinuation { sampleGate = $0 } }
+        if Task.isCancelled { cancelledSamples.insert(current) }
         let identity = ProcessIdentity(pid: 42, startTimeMicroseconds: 100)
         return .init(system: systemFailures.contains(current) ? .unavailable("processListFailed") : .value([
             .init(identity: identity, name: "Editor", cpuNanoseconds: UInt64(current) * 500_000_000,
@@ -440,10 +499,11 @@ private actor ProcessSequenceProvider: ProcessMetricsProviding {
 }
 
 private func processEngine(_ process: any ProcessMetricsProviding,
-                           logger: any DiagnosticLogging = SilentDiagnosticLogger()) -> MonitoringEngine {
+                           logger: any DiagnosticLogging = SilentDiagnosticLogger(),
+                           sleepMonitor: SystemSleepMonitor = SystemSleepMonitor()) -> MonitoringEngine {
     MonitoringEngine(providers: ProviderSet(cpu: AdvancingCPUProvider(), memory: FakeMemoryProvider(fails: false),
         network: FakeNetworkProvider(), disk: FakeDiskProvider(), sensors: FakeSensorProvider(), processes: process),
-        logger: logger)
+        logger: logger, sleepMonitor: sleepMonitor)
 }
 
 private actor UpdateRecorder {

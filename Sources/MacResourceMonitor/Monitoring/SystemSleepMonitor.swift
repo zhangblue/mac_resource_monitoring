@@ -12,6 +12,9 @@ final class SystemSleepMonitor: @unchecked Sendable {
 
     private let lock = NSLock()
     private var state = State(generation: UUID(), isSleeping: false)
+    private var sleepHandler: (@Sendable () async -> Void)?
+    private var sleepCleanup: Task<Void, Never>?
+    private var samplingCancellations: [UUID: @Sendable () -> Void] = [:]
     private let center: NotificationCenter
     // Tokens change only during initialization/deinitialization; state is locked.
     private var observers: [NSObjectProtocol] = []
@@ -36,9 +39,52 @@ final class SystemSleepMonitor: @unchecked Sendable {
         return state
     }
 
-    private func transition(isSleeping: Bool) {
+    func setSleepHandler(_ handler: @escaping @Sendable () async -> Void) {
         lock.lock()
         defer { lock.unlock() }
+        sleepHandler = handler
+    }
+
+    func waitForSleepCleanup() async {
+        await pendingSleepCleanup()?.value
+    }
+
+    func registerSampling(_ id: UUID, cancel: @escaping @Sendable () -> Void) {
+        lock.lock()
+        let isSleeping = state.isSleeping
+        if !isSleeping { samplingCancellations[id] = cancel }
+        lock.unlock()
+        if isSleeping { cancel() }
+    }
+
+    func unregisterSampling(_ id: UUID) {
+        lock.lock()
+        defer { lock.unlock() }
+        samplingCancellations.removeValue(forKey: id)
+    }
+
+    private func pendingSleepCleanup() -> Task<Void, Never>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sleepCleanup
+    }
+
+    private func transition(isSleeping: Bool) {
+        lock.lock()
         state = State(generation: UUID(), isSleeping: isSleeping)
+        let cancellations = isSleeping ? Array(samplingCancellations.values) : []
+        if isSleeping, let sleepHandler {
+            let predecessor = sleepCleanup
+            // Publish the cleanup barrier synchronously with the generation.
+            // Wake and queued samples cannot overtake cancellation/child reaping.
+            sleepCleanup = Task {
+                await predecessor?.value
+                await sleepHandler()
+            }
+        }
+        lock.unlock()
+        // Cancel synchronously so child work that is still starting inherits
+        // cancellation too. Never invoke cancellation handlers under the lock.
+        cancellations.forEach { $0() }
     }
 }

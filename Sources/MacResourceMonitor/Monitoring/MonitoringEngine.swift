@@ -77,6 +77,7 @@ actor MonitoringEngine {
         self.providers = providers
         self.logger = logger
         self.sleepMonitor = sleepMonitor
+        sleepMonitor.setSleepHandler { [processes = providers.processes] in await processes.cancel() }
         self.configuration = configuration
         history = MetricHistory(historyDuration: configuration.historyDuration)
     }
@@ -183,19 +184,24 @@ actor MonitoringEngine {
         let token = generation
         let id = UUID()
         let providers = providers
+        let sleepMonitor = sleepMonitor
         let cancelled = MonitoringUpdate(snapshot: Self.cancelledSnapshot(at: date), history: history)
         let task = Task { [weak self] in
             _ = await predecessor?.value
+            await sleepMonitor.waitForSleepCleanup()
             guard !Task.isCancelled, await self?.isCurrent(token) == true else { return cancelled }
             guard let sleepState = self?.sleepMonitor.snapshot(), !sleepState.isSleeping else {
                 return cancelled
             }
             let readings = await Self.collect(providers)
+            await sleepMonitor.waitForSleepCleanup()
             return await self?.commit(readings, at: date, generation: token, sleepState: sleepState) ?? cancelled
         }
         sampling = task
         samplingID = id
+        sleepMonitor.registerSampling(id) { task.cancel() }
         let update = await task.value
+        sleepMonitor.unregisterSampling(id)
         if samplingID == id {
             sampling = nil
             samplingID = nil

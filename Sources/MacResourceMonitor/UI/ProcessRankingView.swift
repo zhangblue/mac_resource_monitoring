@@ -26,6 +26,7 @@ struct ProcessRankingRow: Identifiable, Equatable {
     let id: ProcessIdentity
     let rank: Int
     let displayName: String
+    let pidSuffix: String?
     let formattedValue: String
 }
 
@@ -46,9 +47,9 @@ struct ProcessRankingPresentation {
             }
             let nameCounts = Dictionary(grouping: visible, by: \.name).mapValues(\.count)
             content = .rows(visible.enumerated().map { index, entry in
-                let name = nameCounts[entry.name, default: 0] > 1
-                    ? "\(entry.name) (\(entry.identity.pid))" : entry.name
-                return .init(id: entry.identity, rank: index + 1, displayName: name,
+                let pidSuffix = nameCounts[entry.name, default: 0] > 1
+                    ? "(\(entry.identity.pid))" : nil
+                return .init(id: entry.identity, rank: index + 1, displayName: entry.name, pidSuffix: pidSuffix,
                              formattedValue: style.format(entry.value))
             })
         }
@@ -71,10 +72,17 @@ struct ProcessRankingView: View {
                             Text("\(row.rank)")
                                 .foregroundStyle(.secondary)
                                 .frame(width: 14, alignment: .leading)
-                            Text(row.displayName)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                            HStack(spacing: 2) {
+                                Text(row.displayName)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
+                                if let suffix = row.pidSuffix {
+                                    Text(suffix)
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             Text(row.formattedValue)
                                 .monospacedDigit()
                                 .lineLimit(1)

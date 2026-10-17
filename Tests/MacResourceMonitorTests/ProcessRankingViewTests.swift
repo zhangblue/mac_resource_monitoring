@@ -1,7 +1,46 @@
 import XCTest
+import SwiftUI
+import Vision
 @testable import MacResourceMonitor
 
 final class ProcessRankingViewTests: XCTestCase {
+    // The truncatable part must not contain the disambiguating PID.
+    func testLongDuplicateNamesKeepPIDOutOfTruncatableName() {
+        let name = "Very Long Browser Renderer Helper Process"
+        let entries: [ProcessRankingEntry] = [101, 202].map {
+            .init(identity: .init(pid: $0, startTimeMicroseconds: 10), name: name, value: 12)
+        }
+        guard case let .rows(rows) = ProcessRankingPresentation(reading: .value(entries), style: .cpu).content else {
+            return XCTFail("Expected duplicate rows")
+        }
+        XCTAssertEqual(rows.map(\.displayName), [name, name])
+        XCTAssertEqual(rows.map(\.pidSuffix), ["(101)", "(202)"])
+    }
+
+    // Read the rendered narrow card, not source text or accessibility labels
+    // (accessibility labels can include characters that are visually truncated).
+    @MainActor
+    func testNarrowRankingKeepsEveryDuplicatePIDInsideTheNameColumn() throws {
+        let entries: [ProcessRankingEntry] = [101, 202].map {
+            .init(identity: .init(pid: $0, startTimeMicroseconds: 10),
+                  name: "Very Long Browser Renderer Helper Process", value: 12)
+        }
+        let renderer = ImageRenderer(content:
+            ProcessRankingView(processes: .value(entries), style: .cpu)
+                .frame(width: 144).padding(8).foregroundStyle(.black).background(.white))
+        renderer.scale = 4
+        let image = try XCTUnwrap(renderer.cgImage)
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["en-US"]
+        request.usesLanguageCorrection = false
+        try VNImageRequestHandler(cgImage: image).perform([request])
+        let lines = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }
+        XCTAssertTrue(lines.contains { $0.contains("(101)") }, "Rendered rows: \(lines)")
+        XCTAssertTrue(lines.contains { $0.contains("(202)") }, "Rendered rows: \(lines)")
+        XCTAssertEqual(lines.filter { $0.contains("12.0%") }.count, 2, "Values must remain visible")
+    }
+
     // Using aggregate percentage rounding or the wrong units loses process detail.
     func testStylesFormatProcessValuesWithTheirOwnUnits() {
         XCTAssertEqual(ProcessRankingStyle.cpu.format(142.35), "142.4%")
@@ -32,9 +71,9 @@ final class ProcessRankingViewTests: XCTestCase {
         ]), style: .cpu)
 
         XCTAssertEqual(presentation.content, .rows([
-            .init(id: first, rank: 1, displayName: "Chrome (101)", formattedValue: "142.4%"),
-            .init(id: second, rank: 2, displayName: "Chrome (202)", formattedValue: "50.0%"),
-            .init(id: third, rank: 3, displayName: "Finder", formattedValue: "2.3%")
+            .init(id: first, rank: 1, displayName: "Chrome", pidSuffix: "(101)", formattedValue: "142.4%"),
+            .init(id: second, rank: 2, displayName: "Chrome", pidSuffix: "(202)", formattedValue: "50.0%"),
+            .init(id: third, rank: 3, displayName: "Finder", pidSuffix: nil, formattedValue: "2.3%")
         ]))
     }
 
@@ -52,6 +91,7 @@ final class ProcessRankingViewTests: XCTestCase {
         }
         XCTAssertEqual(rows.map(\.rank), [1, 2, 3, 4, 5])
         XCTAssertEqual(rows.map(\.displayName), ["App 1", "App 2", "App 3", "App 4", "App 5"])
+        XCTAssertTrue(rows.allSatisfy { $0.pidSuffix == nil })
         XCTAssertEqual(rows.map(\.formattedValue), ["6 B/s", "5 B/s", "4 B/s", "3 B/s", "2 B/s"])
     }
 
