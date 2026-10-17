@@ -43,19 +43,27 @@ final class NetTopProcessProviderTests: XCTestCase {
         }
     }
 
-    func testEightHundredMillisecondTimeoutCancelsCommand() async {
-        let runner = SuspendedNetTopRunner()
+    func testRunnerTimeoutTerminatesThenForceKillsUnresponsiveCommand() async {
+        let process = ControlledChildProcess()
+        let forceKills = ForceKillRecorder()
+        let runner = FoundationNetTopCommandRunner(
+            processFactory: { process },
+            timeout: .milliseconds(50),
+            terminationGrace: .milliseconds(20),
+            forceKill: { child in
+                forceKills.record(child)
+                let controlled = child as! ControlledChildProcess
+                controlled.signalExit()
+                controlled.closeStdout()
+                controlled.closeStderr()
+            }
+        )
         let start = ContinuousClock.now
         await expectError(.timedOut, provider: NetTopProcessProvider(runner: runner, identities: FixtureIdentities()))
-        XCTAssertLessThan(start.duration(to: .now), .seconds(2))
-        let cancelled = await runner.cancelled
-        XCTAssertTrue(cancelled)
-    }
-
-    // Catches reporting user cancellation when timeout-driven termination finishes first.
-    func testTimeoutKeepsItsErrorWhenTerminationImmediatelyFinishesCommand() async {
-        await expectError(.timedOut, provider: NetTopProcessProvider(
-            runner: ImmediatelyTerminatingRunner(), identities: FixtureIdentities()))
+        XCTAssertLessThan(start.duration(to: .now), .seconds(1))
+        XCTAssertTrue(process.wasTerminated)
+        XCTAssertEqual(forceKills.count, 1)
+        XCTAssertTrue(process.readDescriptorsAreClosed)
     }
 
     func testTaskCancellationTerminatesCommandAndReleasesSingleInstance() async throws {
@@ -103,6 +111,60 @@ final class NetTopProcessProviderTests: XCTestCase {
         catch { XCTAssertEqual(error as? NetTopProcessProviderError, .cancelled) }
     }
 
+    // Regression: Foundation's waitUntilExit() can remain blocked on a detached
+    // task even after the child has exited and its termination handler has fired.
+    func testFoundationCompletionDoesNotDependOnWaitUntilExitRunLoop() async throws {
+        let process = ControlledChildProcess()
+        let runner = FoundationNetTopCommandRunner(processFactory: { process })
+        let completed = CompletionFlag()
+        let running = Task {
+            let result = try await runner.run(
+                executable: NetTopProcessProvider.executable,
+                arguments: NetTopProcessProvider.arguments
+            )
+            await completed.mark()
+            return result
+        }
+
+        await waitFor { process.hasStarted }
+        process.signalExit(status: 0)
+        process.closeStdout()
+        process.closeStderr()
+        try await Task.sleep(for: .milliseconds(100))
+        let completedWithoutRunLoopWait = await completed.value
+
+        // Always release the legacy gate so a RED run can clean up normally.
+        process.releaseWaitUntilExit()
+        let result = try await running.value
+        XCTAssertTrue(completedWithoutRunLoopWait)
+        XCTAssertEqual(result.exitStatus, 0)
+        XCTAssertFalse(process.didWaitForExit)
+    }
+
+    func testTerminationBeforeAsyncWaitRegistrationStillCompletes() async throws {
+        let process = ControlledChildProcess(exitDuringRun: true)
+        let runner = FoundationNetTopCommandRunner(processFactory: { process })
+        let completed = CompletionFlag()
+        let running = Task {
+            let result = try await runner.run(
+                executable: NetTopProcessProvider.executable,
+                arguments: NetTopProcessProvider.arguments
+            )
+            await completed.mark()
+            return result
+        }
+
+        await waitFor { process.hasStarted }
+        try await Task.sleep(for: .milliseconds(100))
+        let completedAfterImmediateExit = await completed.value
+
+        process.releaseWaitUntilExit()
+        let result = try await running.value
+        XCTAssertTrue(completedAfterImmediateExit)
+        XCTAssertEqual(result.exitStatus, 0)
+        XCTAssertFalse(process.didWaitForExit)
+    }
+
     // Uses real pipes and the production readers; only OS child lifecycle is controlled.
     func testFoundationCancelWaitsForChildExitAndBothPipeReadersThenCanRestart() async throws {
         let first = ControlledChildProcess()
@@ -114,21 +176,21 @@ final class NetTopProcessProviderTests: XCTestCase {
         let returned = CompletionFlag()
         let cancelling = Task { await runner.cancel(); await returned.mark() }
         await waitFor { first.wasTerminated }
-        try await assertNotReturned(returned, "cancel returned before waitUntilExit completed")
-        first.releaseExit()
-        await waitFor { first.didWaitForExit }
+        try await assertNotReturned(returned, "cancel returned before the child termination callback")
+        first.signalExit()
         try await assertNotReturned(returned, "cancel returned before either reader reached EOF")
         first.closeStdout()
         try await assertNotReturned(returned, "cancel returned while stderr reader still blocked")
         first.closeStderr()
         await cancelling.value
+        XCTAssertFalse(first.didWaitForExit)
         XCTAssertTrue(first.readDescriptorsAreClosed)
         do { _ = try await running.value; XCTFail("Expected cancellation") }
         catch { XCTAssertEqual(error as? NetTopProcessProviderError, .cancelled) }
 
         let restarted = Task { try await runner.run(executable: NetTopProcessProvider.executable, arguments: NetTopProcessProvider.arguments) }
         await waitFor { second.hasStarted }
-        second.releaseExit()
+        second.signalExit()
         second.closeStdout()
         second.closeStderr()
         let result = try await restarted.value
@@ -157,11 +219,11 @@ final class NetTopProcessProviderTests: XCTestCase {
         let returned = CompletionFlag()
         let cancelling = Task { await runner.cancel(); await returned.mark() }
         try await assertNotReturned(returned, "terminal failure must still await the child and readers")
-        process.releaseExit()
+        process.signalExit()
         process.closeStdout()
         process.closeStderr()
         await cancelling.value
-        XCTAssertTrue(process.didWaitForExit)
+        XCTAssertFalse(process.didWaitForExit)
         XCTAssertTrue(process.readDescriptorsAreClosed)
         do { _ = try await running.value; XCTFail("Expected \(expected)") }
         catch { XCTAssertEqual(error as? NetTopProcessProviderError, expected) }
@@ -200,16 +262,25 @@ private final class ControlledChildProcess: Process, @unchecked Sendable {
     private var commandArguments: [String]?
     private var outputPipe: Any?
     private var errorPipe: Any?
+    private var storedTerminationHandler: (@Sendable (Process) -> Void)?
     override var executableURL: URL? { get { commandURL } set { commandURL = newValue } }
     override var arguments: [String]? { get { commandArguments } set { commandArguments = newValue } }
     override var standardOutput: Any? { get { outputPipe } set { outputPipe = newValue } }
     override var standardError: Any? { get { errorPipe } set { errorPipe = newValue } }
+    override var terminationHandler: (@Sendable (Process) -> Void)? {
+        get { condition.lock(); defer { condition.unlock() }; return storedTerminationHandler }
+        set { condition.lock(); storedTerminationHandler = newValue; condition.unlock() }
+    }
     private let condition = NSCondition()
     private var started = false
     private var childRunning = false
     private var terminated = false
     private var waited = false
+    private var waitUntilExitReleased = false
+    private var exitStatus: Int32 = 0
     private var readDescriptors: [Int32] = []
+    private let exitDuringRun: Bool
+    init(exitDuringRun: Bool = false) { self.exitDuringRun = exitDuringRun }
     var hasStarted: Bool { condition.lock(); defer { condition.unlock() }; return started }
     var wasTerminated: Bool { condition.lock(); defer { condition.unlock() }; return terminated }
     var didWaitForExit: Bool { condition.lock(); defer { condition.unlock() }; return waited }
@@ -218,23 +289,43 @@ private final class ControlledChildProcess: Process, @unchecked Sendable {
         return readDescriptors.count == 2 && readDescriptors.allSatisfy { fcntl($0, F_GETFD) == -1 && errno == EBADF }
     }
     override var isRunning: Bool { condition.lock(); defer { condition.unlock() }; return childRunning }
-    override var terminationStatus: Int32 { 0 }
+    override var terminationStatus: Int32 { condition.lock(); defer { condition.unlock() }; return exitStatus }
     override func run() throws {
-        condition.lock(); defer { condition.unlock() }
+        condition.lock()
         XCTAssertEqual(executableURL?.path, "/usr/bin/nettop")
         XCTAssertEqual(arguments, ["-P", "-L", "1", "-x", "-J", "bytes_in,bytes_out"])
         readDescriptors = [(standardOutput as! Pipe).fileHandleForReading.fileDescriptor,
                            (standardError as! Pipe).fileHandleForReading.fileDescriptor]
         childRunning = true
         started = true
+        let shouldExit = exitDuringRun
+        condition.unlock()
+        if shouldExit {
+            signalExit(status: 0)
+            closeStdout()
+            closeStderr()
+        }
     }
     override func terminate() { condition.lock(); terminated = true; condition.unlock() }
     override func waitUntilExit() {
         condition.lock(); defer { condition.unlock() }
-        while childRunning { condition.wait() }
+        while !waitUntilExitReleased { condition.wait() }
         waited = true
     }
-    func releaseExit() { condition.lock(); childRunning = false; condition.broadcast(); condition.unlock() }
+    func signalExit(status: Int32 = 0) {
+        condition.lock()
+        childRunning = false
+        exitStatus = status
+        let handler = storedTerminationHandler
+        condition.unlock()
+        handler?(self)
+    }
+    func releaseWaitUntilExit() {
+        condition.lock()
+        waitUntilExitReleased = true
+        condition.broadcast()
+        condition.unlock()
+    }
     func closeStdout() { try? (standardOutput as! Pipe).fileHandleForWriting.close() }
     func closeStderr() { try? (standardError as! Pipe).fileHandleForWriting.close() }
     func writeStdout(_ data: Data) throws { try (standardOutput as! Pipe).fileHandleForWriting.write(contentsOf: data) }
@@ -243,6 +334,13 @@ private final class ControlledChildProcess: Process, @unchecked Sendable {
 private actor CompletionFlag {
     var value = false
     func mark() { value = true }
+}
+
+private final class ForceKillRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var processes: [Process] = []
+    var count: Int { lock.lock(); defer { lock.unlock() }; return processes.count }
+    func record(_ process: Process) { lock.lock(); processes.append(process); lock.unlock() }
 }
 
 private actor CleanupGate {
@@ -306,21 +404,4 @@ private actor SuspendedNetTopRunner: NetTopCommandRunning {
     }
     func cancel() { cancelled = true }
     func waitUntilStarted() async { while !started { await Task.yield() } }
-}
-
-private actor ImmediatelyTerminatingRunner: NetTopCommandRunning {
-    private var pending: Task<NetTopCommandResult, Error>?
-    func run(executable: String, arguments: [String]) async throws -> NetTopCommandResult {
-        let task = Task<NetTopCommandResult, Error> {
-            try await Task.sleep(for: .seconds(30))
-            throw CancellationError()
-        }
-        pending = task
-        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-    }
-    func cancel() async {
-        pending?.cancel()
-        _ = await pending?.result
-        try? await Task.sleep(for: .milliseconds(100))
-    }
 }

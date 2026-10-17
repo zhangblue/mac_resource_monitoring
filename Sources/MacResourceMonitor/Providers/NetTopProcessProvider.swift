@@ -106,17 +106,7 @@ actor NetTopProcessProvider {
     func sample() async throws -> [ProcessNetworkCounter] {
         guard active == nil else { throw NetTopProcessProviderError.alreadyRunning }
         let runner = runner
-        let task = Task {
-            try await withThrowingTaskGroup(of: NetTopCommandResult.self) { group in
-                group.addTask { try await runner.run(executable: Self.executable, arguments: Self.arguments) }
-                group.addTask {
-                    try await Task.sleep(until: ContinuousClock.now.advanced(by: .milliseconds(800)), clock: .continuous)
-                    throw NetTopProcessProviderError.timedOut
-                }
-                defer { group.cancelAll() }
-                return try await group.next()!
-            }
-        }
+        let task = Task { try await runner.run(executable: Self.executable, arguments: Self.arguments) }
         let id = UUID()
         active = (id, task)
         defer { clearActive(id) }
@@ -164,9 +154,21 @@ actor NetTopProcessProvider {
 actor FoundationNetTopCommandRunner: NetTopCommandRunning {
     private var active: (id: UUID, task: Task<NetTopCommandResult, Error>)?
     private let processFactory: @Sendable () -> Process
+    private let timeout: Duration
+    private let terminationGrace: Duration
+    private let forceKill: @Sendable (Process) -> Void
 
-    init(processFactory: @escaping @Sendable () -> Process = { Process() }) {
+    init(processFactory: @escaping @Sendable () -> Process = { Process() },
+         timeout: Duration = .milliseconds(800),
+         terminationGrace: Duration = .milliseconds(200),
+         forceKill: @escaping @Sendable (Process) -> Void = { process in
+             guard process.isRunning, process.processIdentifier > 0 else { return }
+             Darwin.kill(process.processIdentifier, SIGKILL)
+         }) {
         self.processFactory = processFactory
+        self.timeout = timeout
+        self.terminationGrace = terminationGrace
+        self.forceKill = forceKill
     }
 
     func run(executable: String, arguments: [String]) async throws -> NetTopCommandResult {
@@ -174,22 +176,24 @@ actor FoundationNetTopCommandRunner: NetTopCommandRunning {
         guard executable == NetTopProcessProvider.executable, arguments == NetTopProcessProvider.arguments else {
             throw NetTopProcessProviderError.commandFailed
         }
-        let command = NetTopExecution(process: processFactory())
+        let command = NetTopExecution(
+            process: processFactory(),
+            terminationGrace: terminationGrace,
+            forceKill: forceKill
+        )
+        let timeout = timeout
         let task = Task {
             try await withTaskCancellationHandler {
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    group.addTask {
-                        do {
-                            try await Task.sleep(until: ContinuousClock.now.advanced(by: .milliseconds(800)), clock: .continuous)
-                        } catch { return }
-                        command.stop(.timedOut)
-                    }
-                    defer { group.cancelAll() }
-                    // collect is the single completion path: it waits for exit,
-                    // drains both readers and closes all handles before returning.
-                    // Only its stored first failure decides the outcome.
-                    return try await command.collect()
+                let watchdog = Task {
+                    try? await Task.sleep(for: timeout)
+                    guard !Task.isCancelled else { return }
+                    command.stop(.timedOut)
                 }
+                defer { watchdog.cancel() }
+                // collect is the single completion path: it waits for the
+                // termination callback, drains both readers and closes all
+                // handles. Only its stored first failure decides the outcome.
+                return try await command.collect()
             } onCancel: { command.stop(.cancelled) }
         }
         let id = UUID()
@@ -210,28 +214,75 @@ actor FoundationNetTopCommandRunner: NetTopCommandRunning {
     }
 }
 
-// The lock protects Process launch/termination and data shared by the two pipe readers.
-// Every exit path waits for the child and both readers before closing their handles.
+private final class ProcessTerminationLatch: @unchecked Sendable {
+    private let lock = NSLock()
+    private var status: Int32?
+    private var continuation: CheckedContinuation<Int32, Never>?
+
+    func wait() async -> Int32 {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if let status {
+                lock.unlock()
+                continuation.resume(returning: status)
+            } else {
+                self.continuation = continuation
+                lock.unlock()
+            }
+        }
+    }
+
+    func finish(_ status: Int32) {
+        lock.lock()
+        guard self.status == nil else {
+            lock.unlock()
+            return
+        }
+        self.status = status
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: status)
+    }
+}
+
+// The lock protects Process launch/termination and data shared by the two pipe
+// readers. Every exit path waits for the termination callback and both readers
+// before closing their handles.
 private final class NetTopExecution: @unchecked Sendable {
     private let lock = NSLock()
     private let process: Process
     private let stdout = Pipe()
     private let stderr = Pipe()
+    private let termination = ProcessTerminationLatch()
+    private let terminationGrace: Duration
+    private let forceKill: @Sendable (Process) -> Void
     private var failure: NetTopProcessProviderError?
     private var output = Data()
     private var byteCount = 0
     private var launched = false
+    private var terminationRequested = false
+    private var forceKillTask: Task<Void, Never>?
 
-    init(process: Process) {
+    init(process: Process,
+         terminationGrace: Duration,
+         forceKill: @escaping @Sendable (Process) -> Void) {
         self.process = process
+        self.terminationGrace = terminationGrace
+        self.forceKill = forceKill
         process.executableURL = URL(fileURLWithPath: NetTopProcessProvider.executable)
         process.arguments = NetTopProcessProvider.arguments
         process.standardOutput = stdout
         process.standardError = stderr
+        let termination = termination
+        process.terminationHandler = { process in
+            termination.finish(process.terminationStatus)
+        }
     }
 
     func collect() async throws -> NetTopCommandResult {
         defer {
+            cancelForceKill()
             try? stdout.fileHandleForReading.close()
             try? stdout.fileHandleForWriting.close()
             try? stderr.fileHandleForReading.close()
@@ -240,10 +291,10 @@ private final class NetTopExecution: @unchecked Sendable {
         try launch()
         let outReader = Task.detached { self.read(self.stdout.fileHandleForReading, capture: true) }
         let errReader = Task.detached { self.read(self.stderr.fileHandleForReading, capture: false) }
-        await Task.detached { self.process.waitUntilExit() }.value
+        let exitStatus = await termination.wait()
         await outReader.value
         await errReader.value
-        return try result()
+        return try result(exitStatus: exitStatus)
     }
 
     private func launch() throws {
@@ -256,9 +307,22 @@ private final class NetTopExecution: @unchecked Sendable {
 
     func stop(_ reason: NetTopProcessProviderError) {
         lock.lock()
-        defer { lock.unlock() }
         if failure == nil { failure = reason }
-        if launched, process.isRunning { process.terminate() }
+        guard launched, process.isRunning, !terminationRequested else {
+            lock.unlock()
+            return
+        }
+        terminationRequested = true
+        let process = process
+        let grace = terminationGrace
+        let forceKill = forceKill
+        forceKillTask = Task.detached {
+            try? await Task.sleep(for: grace)
+            guard !Task.isCancelled else { return }
+            forceKill(process)
+        }
+        lock.unlock()
+        process.terminate()
     }
 
     private func read(_ handle: FileHandle, capture: Bool) {
@@ -283,10 +347,18 @@ private final class NetTopExecution: @unchecked Sendable {
         }
     }
 
-    private func result() throws -> NetTopCommandResult {
+    private func cancelForceKill() {
+        lock.lock()
+        let task = forceKillTask
+        forceKillTask = nil
+        lock.unlock()
+        task?.cancel()
+    }
+
+    private func result(exitStatus: Int32) throws -> NetTopCommandResult {
         lock.lock()
         defer { lock.unlock() }
         if let failure { throw failure }
-        return .init(output: output, exitStatus: process.terminationStatus)
+        return .init(output: output, exitStatus: exitStatus)
     }
 }
