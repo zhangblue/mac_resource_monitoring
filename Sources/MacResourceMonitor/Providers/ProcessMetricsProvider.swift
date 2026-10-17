@@ -22,8 +22,15 @@ actor ProcessMetricsProvider: ProcessMetricsProviding {
 
     private static func readNetwork(_ provider: NetTopProcessProvider) async -> Reading<[ProcessNetworkCounter]> {
         do { return .value(try await provider.sample()) }
-        catch let error as NetTopProcessProviderError { return .unavailable(String(describing: error)) }
-        catch is CancellationError { return .unavailable("cancelled") }
-        catch { return .unavailable("commandFailed") }
+        catch let error as NetTopProcessProviderError {
+            switch error {
+            case .timedOut: return .unavailable("nettopTimedOut")
+            case .outputTooLarge: return .unavailable("nettopOutputTooLarge")
+            case .nonzeroExit: return .unavailable("nettopExitFailed")
+            case .invalidCSV, .missingColumns, .noProcessRows: return .unavailable("nettopInvalidCSV")
+            case .commandFailed, .cancelled, .alreadyRunning: return .unavailable("nettopLaunchFailed")
+            }
+        }
+        catch { return .unavailable("nettopLaunchFailed") }
     }
 }

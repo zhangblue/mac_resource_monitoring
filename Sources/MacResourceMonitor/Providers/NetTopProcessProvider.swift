@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 enum NetTopProcessProviderError: Error, Equatable {
     case invalidCSV
@@ -94,7 +95,7 @@ actor NetTopProcessProvider {
     static let outputLimit = 1_048_576
     private let runner: any NetTopCommandRunning
     private let identities: any ProcessIdentityResolving
-    private var active: Task<NetTopCommandResult, Error>?
+    private var active: (id: UUID, task: Task<NetTopCommandResult, Error>)?
 
     init(runner: any NetTopCommandRunning = FoundationNetTopCommandRunner(),
          identities: any ProcessIdentityResolving = ProcessSystemProvider()) {
@@ -116,8 +117,9 @@ actor NetTopProcessProvider {
                 return try await group.next()!
             }
         }
-        active = task
-        defer { active = nil }
+        let id = UUID()
+        active = (id, task)
+        defer { clearActive(id) }
         let result: NetTopCommandResult
         do {
             result = try await withTaskCancellationHandler {
@@ -146,45 +148,73 @@ actor NetTopProcessProvider {
     }
 
     func cancel() async {
-        active?.cancel()
-        await runner.cancel()
+        guard let active else { return }
+        active.task.cancel()
+        // The sample task owns the runner invocation and its structured cleanup.
+        // Await it rather than allowing cancel to race a later invocation.
+        _ = await active.task.result
+        clearActive(active.id)
+    }
+
+    private func clearActive(_ id: UUID) {
+        if active?.id == id { active = nil }
     }
 }
 
 actor FoundationNetTopCommandRunner: NetTopCommandRunning {
-    private var execution: NetTopExecution?
+    private var active: (id: UUID, task: Task<NetTopCommandResult, Error>)?
+    private let processFactory: @Sendable () -> Process
+
+    init(processFactory: @escaping @Sendable () -> Process = { Process() }) {
+        self.processFactory = processFactory
+    }
 
     func run(executable: String, arguments: [String]) async throws -> NetTopCommandResult {
-        guard execution == nil else { throw NetTopProcessProviderError.alreadyRunning }
+        guard active == nil else { throw NetTopProcessProviderError.alreadyRunning }
         guard executable == NetTopProcessProvider.executable, arguments == NetTopProcessProvider.arguments else {
             throw NetTopProcessProviderError.commandFailed
         }
-        let command = NetTopExecution()
-        execution = command
-        defer { execution = nil }
-        return try await withTaskCancellationHandler {
-            try Task.checkCancellation()
-            return try await withThrowingTaskGroup(of: NetTopCommandResult.self) { group in
-                group.addTask { try await command.collect() }
-                group.addTask {
-                    try await Task.sleep(until: ContinuousClock.now.advanced(by: .milliseconds(800)), clock: .continuous)
-                    command.stop(.timedOut)
-                    throw NetTopProcessProviderError.timedOut
+        let command = NetTopExecution(process: processFactory())
+        let task = Task {
+            try await withTaskCancellationHandler {
+                try await withThrowingTaskGroup(of: Void.self) { group in
+                    group.addTask {
+                        do {
+                            try await Task.sleep(until: ContinuousClock.now.advanced(by: .milliseconds(800)), clock: .continuous)
+                        } catch { return }
+                        command.stop(.timedOut)
+                    }
+                    defer { group.cancelAll() }
+                    // collect is the single completion path: it waits for exit,
+                    // drains both readers and closes all handles before returning.
+                    // Only its stored first failure decides the outcome.
+                    return try await command.collect()
                 }
-                defer { group.cancelAll() }
-                return try await group.next()!
-            }
-        } onCancel: { command.stop(.cancelled) }
+            } onCancel: { command.stop(.cancelled) }
+        }
+        let id = UUID()
+        active = (id, task)
+        defer { clearActive(id) }
+        return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
 
-    func cancel() { execution?.stop(.cancelled) }
+    func cancel() async {
+        guard let active else { return }
+        active.task.cancel()
+        _ = await active.task.result
+        clearActive(active.id)
+    }
+
+    private func clearActive(_ id: UUID) {
+        if active?.id == id { active = nil }
+    }
 }
 
 // The lock protects Process launch/termination and data shared by the two pipe readers.
 // Every exit path waits for the child and both readers before closing their handles.
 private final class NetTopExecution: @unchecked Sendable {
     private let lock = NSLock()
-    private let process = Process()
+    private let process: Process
     private let stdout = Pipe()
     private let stderr = Pipe()
     private var failure: NetTopProcessProviderError?
@@ -192,7 +222,8 @@ private final class NetTopExecution: @unchecked Sendable {
     private var byteCount = 0
     private var launched = false
 
-    init() {
+    init(process: Process) {
+        self.process = process
         process.executableURL = URL(fileURLWithPath: NetTopProcessProvider.executable)
         process.arguments = NetTopProcessProvider.arguments
         process.standardOutput = stdout
@@ -231,16 +262,25 @@ private final class NetTopExecution: @unchecked Sendable {
     }
 
     private func read(_ handle: FileHandle, capture: Bool) {
-        do {
-            while let data = try handle.read(upToCount: 16_384), !data.isEmpty {
-                lock.lock()
-                byteCount += data.count
-                let tooLarge = byteCount > NetTopProcessProvider.outputLimit
-                if !tooLarge, capture, failure == nil { output.append(data) }
-                lock.unlock()
-                if tooLarge { stop(.outputTooLarge); return }
+        let descriptor = handle.fileDescriptor
+        var buffer = [UInt8](repeating: 0, count: 16_384)
+        while true {
+            // A single POSIX read returns available pipe bytes. FileHandle's
+            // length-based read may wait to fill the buffer and hide an overrun.
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
+            if count == 0 { return }
+            if count < 0 {
+                if errno == EINTR { continue }
+                stop(.commandFailed)
+                return
             }
-        } catch { stop(.commandFailed) }
+            lock.lock()
+            byteCount += count
+            let tooLarge = byteCount > NetTopProcessProvider.outputLimit
+            if !tooLarge, capture, failure == nil { output.append(contentsOf: buffer.prefix(count)) }
+            lock.unlock()
+            if tooLarge { stop(.outputTooLarge); return }
+        }
     }
 
     private func result() throws -> NetTopCommandResult {

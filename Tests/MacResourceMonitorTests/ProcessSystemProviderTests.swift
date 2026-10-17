@@ -62,6 +62,32 @@ final class ProcessSystemProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.system.value?.first?.residentBytes, 4096)
         XCTAssertTrue(snapshot.network.isUnavailable)
     }
+
+    // Catches leaking private enum/exit details instead of the documented safe categories.
+    func testNetworkFailuresMapToFormalSafeCategories() async {
+        let cases: [(NetTopProcessProviderError, String)] = [
+            (.commandFailed, "nettopLaunchFailed"), (.timedOut, "nettopTimedOut"),
+            (.outputTooLarge, "nettopOutputTooLarge"), (.nonzeroExit(123), "nettopExitFailed"),
+            (.invalidCSV, "nettopInvalidCSV"), (.missingColumns, "nettopInvalidCSV"),
+            (.noProcessRows, "nettopInvalidCSV"), (.cancelled, "nettopLaunchFailed"),
+            (.alreadyRunning, "nettopLaunchFailed")
+        ]
+        for (error, expected) in cases {
+            let provider = ProcessMetricsProvider(system: ProcessSystemProvider(access: FailingProcessAccess()),
+                network: NetTopProcessProvider(runner: ThrowingNetTopRunner(error: error), identities: FixtureIdentities()))
+            let snapshot = await provider.sample()
+            guard case let .unavailable(reason) = snapshot.network else { return XCTFail("Expected unavailable") }
+            XCTAssertEqual(reason, expected)
+            guard case let .unavailable(systemReason) = snapshot.system else { return XCTFail("Expected unavailable") }
+            XCTAssertEqual(systemReason, "processListFailed")
+        }
+    }
+}
+
+private struct ThrowingNetTopRunner: NetTopCommandRunning {
+    let error: NetTopProcessProviderError
+    func run(executable: String, arguments: [String]) async throws -> NetTopCommandResult { throw error }
+    func cancel() async {}
 }
 
 private func processInfo() -> proc_taskallinfo {
