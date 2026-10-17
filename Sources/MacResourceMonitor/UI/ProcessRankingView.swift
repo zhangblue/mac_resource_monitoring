@@ -30,10 +30,23 @@ struct ProcessRankingRow: Identifiable, Equatable {
     let formattedValue: String
 }
 
+struct ProcessRankingSlot: Identifiable, Equatable {
+    enum Content: Equatable {
+        case process(ProcessRankingRow)
+        case message(String)
+        case empty
+    }
+
+    let id: Int
+    let content: Content
+}
+
 struct ProcessRankingPresentation {
     let content: ProcessRankingContent
+    let slots: [ProcessRankingSlot]
 
     init(reading: Reading<[ProcessRankingEntry]>?, style: ProcessRankingStyle) {
+        let content: ProcessRankingContent
         switch reading {
         case nil:
             content = .message("等待下一次采样")
@@ -42,7 +55,8 @@ struct ProcessRankingPresentation {
         case let .value(entries):
             let visible = Array(entries.prefix(5))
             guard !visible.isEmpty else {
-                content = .message("暂无活动进程")
+                self.content = .message("暂无活动进程")
+                self.slots = Self.makeSlots(for: self.content)
                 return
             }
             let nameCounts = Dictionary(grouping: visible, by: \.name).mapValues(\.count)
@@ -53,6 +67,21 @@ struct ProcessRankingPresentation {
                              formattedValue: style.format(entry.value))
             })
         }
+        self.content = content
+        slots = Self.makeSlots(for: content)
+    }
+
+    private static func makeSlots(for content: ProcessRankingContent) -> [ProcessRankingSlot] {
+        let filled: [ProcessRankingSlot.Content]
+        switch content {
+        case let .rows(rows):
+            filled = rows.map(ProcessRankingSlot.Content.process)
+        case let .message(message):
+            filled = [.message(message)]
+        }
+        return (0..<5).map { index in
+            .init(id: index, content: index < filled.count ? filled[index] : .empty)
+        }
     }
 }
 
@@ -61,13 +90,14 @@ struct ProcessRankingView: View {
     let style: ProcessRankingStyle
 
     var body: some View {
+        let presentation = ProcessRankingPresentation(reading: processes, style: style)
         VStack(alignment: .leading, spacing: 5) {
             Text("进程 Top 5")
                 .foregroundStyle(.secondary)
-            switch ProcessRankingPresentation(reading: processes, style: style).content {
-            case let .rows(rows):
-                Grid(alignment: .trailing, horizontalSpacing: 4, verticalSpacing: 4) {
-                    ForEach(rows) { row in
+            Grid(alignment: .trailing, horizontalSpacing: 4, verticalSpacing: 4) {
+                ForEach(presentation.slots) { slot in
+                    switch slot.content {
+                    case let .process(row):
                         GridRow {
                             Text("\(row.rank)")
                                 .foregroundStyle(.secondary)
@@ -88,12 +118,25 @@ struct ProcessRankingView: View {
                                 .lineLimit(1)
                                 .fixedSize(horizontal: true, vertical: false)
                         }
+                        .frame(height: 12)
+                    case let .message(message):
+                        GridRow {
+                            Text(message)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .gridCellColumns(3)
+                        }
+                        .frame(height: 12)
+                    case .empty:
+                        GridRow {
+                            Color.clear
+                                .frame(height: 12)
+                                .gridCellColumns(3)
+                        }
+                        .accessibilityHidden(true)
                     }
                 }
-            case let .message(message):
-                Text(message)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
             }
         }
         .font(.caption2)

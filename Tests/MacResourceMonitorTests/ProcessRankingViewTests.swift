@@ -4,6 +4,65 @@ import Vision
 @testable import MacResourceMonitor
 
 final class ProcessRankingViewTests: XCTestCase {
+    func testRankingAlwaysBuildsFiveVisualSlots() {
+        for count in [1, 3, 5] {
+            let presentation = ProcessRankingPresentation(
+                reading: .value(makeEntries(count: count)),
+                style: .cpu
+            )
+            XCTAssertEqual(presentation.slots.count, 5)
+            XCTAssertEqual(presentation.slots.filter { slot in
+                if case .process = slot.content { return true }
+                return false
+            }.count, count)
+            XCTAssertEqual(presentation.slots.filter { slot in
+                if case .empty = slot.content { return true }
+                return false
+            }.count, 5 - count)
+        }
+
+        let messageReadings: [Reading<[ProcessRankingEntry]>?] = [
+            nil,
+            .value([]),
+            .unavailable("nettopTimedOut")
+        ]
+        for reading in messageReadings {
+            let presentation = ProcessRankingPresentation(reading: reading, style: .download)
+            XCTAssertEqual(presentation.slots.count, 5)
+            XCTAssertEqual(presentation.slots.filter { slot in
+                if case .message = slot.content { return true }
+                return false
+            }.count, 1)
+            XCTAssertEqual(presentation.slots.filter { slot in
+                if case .empty = slot.content { return true }
+                return false
+            }.count, 4)
+        }
+    }
+
+    @MainActor
+    func testRankingRenderedHeightIsStableForEveryPopulationAndMessageState() throws {
+        let readings: [Reading<[ProcessRankingEntry]>?] = [
+            nil,
+            .value([]),
+            .value(makeEntries(count: 1)),
+            .value(makeEntries(count: 3)),
+            .value(makeEntries(count: 5)),
+            .unavailable("nettopTimedOut")
+        ]
+        let heights = try readings.map { reading in
+            let renderer = ImageRenderer(content:
+                ProcessRankingView(processes: reading, style: .cpu)
+                    .frame(width: 180)
+                    .padding(8)
+                    .foregroundStyle(.black)
+                    .background(.white))
+            renderer.scale = 1
+            return try XCTUnwrap(renderer.cgImage).height
+        }
+        XCTAssertEqual(Set(heights).count, 1, "Rendered heights: \(heights)")
+    }
+
     // The truncatable part must not contain the disambiguating PID.
     func testLongDuplicateNamesKeepPIDOutOfTruncatableName() {
         let name = "Very Long Browser Renderer Helper Process"
@@ -112,5 +171,16 @@ final class ProcessRankingViewTests: XCTestCase {
     func testSuccessfulEmptyRankingDisplaysNoActiveProcesses() {
         XCTAssertEqual(ProcessRankingPresentation(reading: .value([]), style: .download).content,
                        .message("暂无活动进程"))
+    }
+
+    private func makeEntries(count: Int) -> [ProcessRankingEntry] {
+        (0..<count).map { index in
+            let identifier = index + 1
+            return ProcessRankingEntry(
+                identity: ProcessIdentity(pid: Int32(identifier), startTimeMicroseconds: UInt64(identifier)),
+                name: "App \(index + 1)",
+                value: Double(index + 1)
+            )
+        }
     }
 }
