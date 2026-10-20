@@ -1,3 +1,4 @@
+import CoreFoundation
 import Foundation
 import XCTest
 @testable import MacResourceMonitor
@@ -26,6 +27,88 @@ final class MonitoringSettingsTests: XCTestCase {
         XCTAssertEqual(settings.refreshInterval, .oneSecond)
         XCTAssertEqual(settings.historyDuration, .fiveMinutes)
         XCTAssertEqual(settings.summary, "每 1 秒刷新 · 保留最近 5 分钟")
+    }
+
+    func testSelectionDefaultsToAllSevenAndConfigurationIncludesIt() {
+        let settings = MonitoringSettings(defaults: defaults)
+        XCTAssertEqual(MetricSection.allCases.count, 7)
+        XCTAssertFalse(settings.selection.isEmpty)
+        for section in MetricSection.allCases {
+            XCTAssertTrue(settings.selection.contains(section), "Default selection excludes \(section)")
+        }
+        XCTAssertEqual(settings.configuration.selection, settings.selection)
+    }
+
+    func testSelectionKeysAreStableAndBooleanWritesAreIndependent() {
+        XCTAssertEqual(MonitoringSettings.selectionKeys, [
+            .cpu: "monitoring.section.cpu", .memory: "monitoring.section.memory",
+            .upload: "monitoring.section.upload", .download: "monitoring.section.download",
+            .chipTemperature: "monitoring.section.chipTemperature",
+            .fan: "monitoring.section.fan", .diskCapacity: "monitoring.section.diskCapacity"
+        ])
+        var selection = MetricSelection.all
+        selection.set(.download, enabled: false)
+        XCTAssertFalse(selection.contains(.download))
+        XCTAssertFalse(selection.isEmpty)
+        selection.set(.download, enabled: true)
+        XCTAssertEqual(selection, .all)
+
+        let settings = MonitoringSettings(defaults: defaults)
+        settings.set(.download, enabled: false)
+        let value = defaults.object(forKey: MonitoringSettings.selectionKeys[.download]!)!
+        XCTAssertEqual(CFGetTypeID(value as CFTypeRef), CFBooleanGetTypeID())
+        XCTAssertNil(defaults.object(forKey: MonitoringSettings.selectionKeys[.cpu]!))
+    }
+
+    func testEachSectionCanBeToggledAndRestoredIndependently() {
+        let settings = MonitoringSettings(defaults: defaults)
+        for section in MetricSection.allCases {
+            settings.set(section, enabled: false)
+            XCTAssertFalse(settings.selection.contains(section))
+            XCTAssertFalse(MonitoringSettings(defaults: defaults).selection.contains(section))
+            for other in MetricSection.allCases where other != section {
+                XCTAssertEqual(MonitoringSettings(defaults: defaults).selection.contains(other),
+                               settings.selection.contains(other))
+            }
+            settings.set(section, enabled: true)
+            XCTAssertTrue(MonitoringSettings(defaults: defaults).selection.contains(section))
+        }
+    }
+
+    func testAllOffPersistsAcrossRecreation() {
+        let settings = MonitoringSettings(defaults: defaults)
+        for section in MetricSection.allCases { settings.set(section, enabled: false) }
+        XCTAssertTrue(settings.selection.isEmpty)
+        XCTAssertTrue(MonitoringSettings(defaults: defaults).selection.isEmpty)
+    }
+
+    func testMissingAndNonBooleanKeysFallBackIndividually() {
+        let keys = MonitoringSettings.selectionKeys
+        XCTAssertEqual(keys.count, MetricSection.allCases.count)
+        defaults.set(false, forKey: keys[.cpu]!)
+        defaults.set("false", forKey: keys[.memory]!)
+        defaults.set(0, forKey: keys[.upload]!)
+        defaults.set(false, forKey: keys[.fan]!)
+        let selection = MonitoringSettings(defaults: defaults).selection
+        XCTAssertFalse(selection.contains(.cpu))
+        XCTAssertFalse(selection.contains(.fan))
+        for section in MetricSection.allCases where section != .cpu && section != .fan {
+            XCTAssertTrue(selection.contains(section), "Invalid/missing \(section) should default on")
+        }
+    }
+
+    func testLegacyRefreshAndHistorySurviveSelectionMigration() {
+        defaults.set(3, forKey: MonitoringSettings.refreshIntervalKey)
+        defaults.set(600, forKey: MonitoringSettings.historyDurationKey)
+        let migrated = MonitoringSettings(defaults: defaults)
+        XCTAssertEqual(migrated.refreshInterval, .threeSeconds)
+        XCTAssertEqual(migrated.historyDuration, .tenMinutes)
+        XCTAssertEqual(migrated.selection, .all)
+        defaults.removeObject(forKey: MonitoringSettings.refreshIntervalKey)
+        defaults.removeObject(forKey: MonitoringSettings.historyDurationKey)
+        let fresh = MonitoringSettings(defaults: defaults)
+        XCTAssertEqual(fresh.refreshInterval, .oneSecond)
+        XCTAssertEqual(fresh.historyDuration, .fiveMinutes)
     }
 
     func testEverySupportedValueRoundTrips() {

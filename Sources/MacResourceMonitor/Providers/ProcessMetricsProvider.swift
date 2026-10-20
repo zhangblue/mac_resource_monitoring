@@ -8,8 +8,14 @@ actor ProcessMetricsProvider: ProcessMetricsProviding {
     }
 
     func sample() async -> ProcessRawSnapshot {
-        async let systemReading = Self.readSystem(system)
-        async let networkReading = Self.readNetwork(network)
+        await sample(system: true, network: true)
+    }
+
+    func sample(system: Bool, network: Bool) async -> ProcessRawSnapshot {
+        async let systemReading: Reading<[ProcessSystemCounter]> = system
+            ? Self.readSystem(self.system) : .unavailable("notSelected")
+        async let networkReading: Reading<[ProcessNetworkCounter]> = network
+            ? Self.readNetwork(self.network) : .unavailable("notSelected")
         return await .init(system: systemReading, network: networkReading)
     }
 

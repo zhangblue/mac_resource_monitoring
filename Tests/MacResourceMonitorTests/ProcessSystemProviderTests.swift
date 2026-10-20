@@ -63,6 +63,44 @@ final class ProcessSystemProviderTests: XCTestCase {
         XCTAssertTrue(snapshot.network.isUnavailable)
     }
 
+    func testSelectiveProcessBranchesDoNotRunUnrequestedProvider() async {
+        let access = CountingProcessAccess()
+        let runner = CountingNetTopRunner()
+        let provider = ProcessMetricsProvider(system: ProcessSystemProvider(access: access),
+            network: NetTopProcessProvider(runner: runner, identities: FixtureIdentities()))
+
+        let systemOnly = await provider.sample(system: true, network: false)
+        XCTAssertEqual(systemOnly.system.value?.count, 1)
+        XCTAssertTrue(systemOnly.network.isUnavailable)
+        XCTAssertEqual(access.listCount, 1)
+        let systemRuns = await runner.runCount
+        XCTAssertEqual(systemRuns, 0)
+
+        access.reset()
+        let networkOnly = await provider.sample(system: false, network: true)
+        XCTAssertTrue(networkOnly.system.isUnavailable)
+        XCTAssertEqual(networkOnly.network.value?.first?.receivedBytes, 1200)
+        XCTAssertEqual(access.listCount, 0)
+        let networkRuns = await runner.runCount
+        XCTAssertEqual(networkRuns, 1)
+
+        let both = await provider.sample(system: true, network: true)
+        XCTAssertEqual(both.system.value?.count, 1)
+        XCTAssertEqual(both.network.value?.count, 1)
+        XCTAssertEqual(access.listCount, 1)
+        let bothRuns = await runner.runCount
+        XCTAssertEqual(bothRuns, 2)
+
+        access.reset()
+        let previousRuns = await runner.runCount
+        let none = await provider.sample(system: false, network: false)
+        XCTAssertTrue(none.system.isUnavailable)
+        XCTAssertTrue(none.network.isUnavailable)
+        XCTAssertEqual(access.listCount, 0)
+        let finalRuns = await runner.runCount
+        XCTAssertEqual(finalRuns, previousRuns)
+    }
+
     // Catches leaking private enum/exit details instead of the documented safe categories.
     func testNetworkFailuresMapToFormalSafeCategories() async {
         let cases: [(NetTopProcessProviderError, String)] = [
@@ -82,6 +120,27 @@ final class ProcessSystemProviderTests: XCTestCase {
             XCTAssertEqual(systemReason, "processListFailed")
         }
     }
+}
+
+private final class CountingProcessAccess: ProcessInfoAccessing, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var listCount: Int { lock.lock(); defer { lock.unlock() }; return count }
+    func reset() { lock.lock(); defer { lock.unlock() }; count = 0 }
+    func allPIDs() throws -> [Int32] {
+        lock.lock(); count += 1; lock.unlock()
+        return [42]
+    }
+    func taskAllInfo(for pid: Int32) -> proc_taskallinfo? { processInfo() }
+}
+
+private actor CountingNetTopRunner: NetTopCommandRunning {
+    private(set) var runCount = 0
+    func run(executable: String, arguments: [String]) async throws -> NetTopCommandResult {
+        runCount += 1
+        return .init(output: Data(",bytes_in,bytes_out\nApp.42,1200,300\n".utf8), exitStatus: 0)
+    }
+    func cancel() async {}
 }
 
 private struct ThrowingNetTopRunner: NetTopCommandRunning {

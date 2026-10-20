@@ -9,6 +9,218 @@ import XCTest
 @testable import MacResourceMonitor
 
 final class MonitoringEngineTests: XCTestCase {
+    func testSingleSelectionsAndAllOffOnlyReadRequestedProviders() async {
+        for selected in MetricSection.allCases {
+            let calls = SelectionCalls()
+            let engine = selectiveEngine(calls: calls, selection: [selected])
+            let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
+            let actual = await calls.counts
+            let expected: [String: Int]
+            switch selected {
+            case .cpu: expected = ["cpu": 1, "processSystem": 1]
+            case .memory: expected = ["memory": 1, "processSystem": 1]
+            case .upload, .download: expected = ["network": 1, "processNetwork": 1]
+            case .chipTemperature: expected = ["temperature": 1]
+            case .fan: expected = ["fan": 1]
+            case .diskCapacity: expected = ["disk": 1]
+            }
+            XCTAssertEqual(actual, expected, "Unexpected reads for \(selected)")
+            if selected != .diskCapacity { XCTAssertTrue(snapshot.disk.isUnavailable) }
+        }
+        let calls = SelectionCalls()
+        let engine = selectiveEngine(calls: calls, selection: [])
+        for second in 1...3 { _ = await engine.sample(at: Date(timeIntervalSince1970: Double(second))) }
+        let counts = await calls.counts
+        XCTAssertTrue(counts.isEmpty)
+        let history = await engine.history
+        XCTAssertEqual(history.cpu.count, 0)
+        XCTAssertEqual(history.memory.count, 0)
+        XCTAssertEqual(history.upload.count, 0)
+        XCTAssertEqual(history.download.count, 0)
+    }
+
+    func testSharedBranchesRunOnceWhenBothDirectionsOrSensorsSelected() async {
+        let calls = SelectionCalls()
+        let engine = selectiveEngine(calls: calls, selection: [.upload, .download, .chipTemperature, .fan])
+        let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        let actual = await calls.counts
+        XCTAssertEqual(actual, ["network": 1, "processNetwork": 1, "temperature": 1, "fan": 1])
+        XCTAssertEqual(snapshot.temperature.value, 40)
+        XCTAssertEqual(snapshot.fan.value, .fanless)
+        XCTAssertNil(snapshot.network.value?.uploadBytesPerSecond)
+    }
+
+    func testSelectionSwitchClearsHistoryAndRankingsAndRebuildsOnlyReenabledRates() async {
+        let engine = processEngine(ProcessSequenceProvider())
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        var selection = MetricSelection.all
+        selection.set(.cpu, enabled: false)
+        selection.set(.upload, enabled: false)
+        await engine.updateConfiguration(.init(refreshInterval: .oneSecond, historyDuration: .fiveMinutes,
+                                               selection: selection))
+        let cleared = await engine.history
+        XCTAssertEqual(cleared.cpu.count, 0)
+        XCTAssertEqual(cleared.upload.count, 0)
+        XCTAssertEqual(cleared.download.count, 2)
+        let off = await engine.sample(at: Date(timeIntervalSince1970: 3))
+        XCTAssertTrue(off.cpuUsage.isUnavailable)
+        XCTAssertTrue(off.processes.cpu.isUnavailable)
+        XCTAssertTrue(off.processes.upload.isUnavailable)
+        XCTAssertNil(off.network.value?.uploadBytesPerSecond)
+        XCTAssertNotNil(off.network.value?.downloadBytesPerSecond)
+        XCTAssertNotNil(off.processes.download.value)
+        selection.set(.cpu, enabled: true)
+        selection.set(.upload, enabled: true)
+        await engine.updateConfiguration(.init(refreshInterval: .oneSecond, historyDuration: .fiveMinutes,
+                                               selection: selection))
+        let baseline = await engine.sample(at: Date(timeIntervalSince1970: 4))
+        XCTAssertTrue(baseline.cpuUsage.isUnavailable)
+        XCTAssertTrue(baseline.processes.cpu.isUnavailable)
+        XCTAssertNil(baseline.network.value?.uploadBytesPerSecond)
+        XCTAssertTrue(baseline.processes.upload.isUnavailable)
+        XCTAssertNotNil(baseline.network.value?.downloadBytesPerSecond)
+        XCTAssertEqual(baseline.processes.download.value?.first?.value, 1_000)
+        let next = await engine.sample(at: Date(timeIntervalSince1970: 5))
+        XCTAssertNotNil(next.cpuUsage.value)
+        XCTAssertNotNil(next.processes.cpu.value)
+        XCTAssertNotNil(next.network.value?.uploadBytesPerSecond)
+        XCTAssertEqual(next.processes.upload.value?.first?.value, 2_000)
+        let history = await engine.history
+        XCTAssertEqual(history.cpu.count, 2)
+        XCTAssertEqual(history.upload.count, 2)
+        XCTAssertEqual(history.download.count, 5)
+    }
+
+    func testDownloadReenableRebuildsOnlyDownloadWhileUploadContinues() async {
+        let engine = processEngine(ProcessSequenceProvider())
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        var selection = MetricSelection.all
+        selection.set(.download, enabled: false)
+        await engine.updateConfiguration(.init(refreshInterval: .oneSecond, historyDuration: .fiveMinutes,
+                                               selection: selection))
+        let off = await engine.sample(at: Date(timeIntervalSince1970: 3))
+        XCTAssertNil(off.network.value?.downloadBytesPerSecond)
+        XCTAssertTrue(off.processes.download.isUnavailable)
+        XCTAssertNotNil(off.network.value?.uploadBytesPerSecond)
+        XCTAssertEqual(off.processes.upload.value?.first?.value, 2_000)
+        selection.set(.download, enabled: true)
+        await engine.updateConfiguration(.init(refreshInterval: .oneSecond, historyDuration: .fiveMinutes,
+                                               selection: selection))
+        let first = await engine.sample(at: Date(timeIntervalSince1970: 4))
+        XCTAssertNil(first.network.value?.downloadBytesPerSecond)
+        XCTAssertTrue(first.processes.download.isUnavailable)
+        XCTAssertNotNil(first.network.value?.uploadBytesPerSecond)
+        XCTAssertEqual(first.processes.upload.value?.first?.value, 2_000)
+        let second = await engine.sample(at: Date(timeIntervalSince1970: 5))
+        XCTAssertNotNil(second.network.value?.downloadBytesPerSecond)
+        XCTAssertEqual(second.processes.download.value?.first?.value, 1_000)
+        let history = await engine.history
+        XCTAssertEqual(history.download.count, 2)
+        XCTAssertEqual(history.upload.count, 5)
+    }
+
+    func testSelectionChangeDiscardsLateResultsAndDiagnostics() async {
+        let process = ProcessSequenceProvider(gatedSample: 2)
+        let logger = ProcessDiagnosticRecorder()
+        let engine = processEngine(process, logger: logger)
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        let pending = Task { await engine.sample(at: Date(timeIntervalSince1970: 3)) }
+        let entered = await MonitoringChecks.waitUntil { await process.isSampling }
+        XCTAssertTrue(entered)
+        var selection = MetricSelection.all
+        selection.set(.cpu, enabled: false)
+        await engine.updateConfiguration(.init(refreshInterval: .oneSecond, historyDuration: .fiveMinutes,
+                                               selection: selection))
+        await process.releaseSample()
+        let discarded = await pending.value
+        XCTAssertTrue(discarded.processes.cpu.isUnavailable)
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 4))
+        let events = await logger.events
+        XCTAssertFalse(events.contains { $0.date == Date(timeIntervalSince1970: 3) })
+        let history = await engine.history
+        XCTAssertEqual(history.cpu.count, 0)
+        XCTAssertEqual(history.memory.elements.map(\.timestamp.timeIntervalSince1970), [1, 2, 4])
+    }
+
+    func testQueuedDiagnosticsCannotFlowAcrossSelectionRevision() async {
+        let logger = GatedDiagnosticLogger()
+        let engine = MonitoringEngine(providers: MonitoringChecks.providers(), logger: logger)
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        let blocked = await MonitoringChecks.waitUntil { await logger.isBlocked }
+        XCTAssertTrue(blocked)
+        var off = MetricSelection.all
+        for section in MetricSection.allCases { off.set(section, enabled: false) }
+        await engine.updateConfiguration(.init(refreshInterval: .oneSecond, historyDuration: .fiveMinutes,
+                                               selection: off))
+        await logger.release()
+        _ = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        try? await Task.sleep(for: .milliseconds(50))
+        let events = await logger.events
+        XCTAssertEqual(events.count, 1, "Queued old-plan diagnostics must stop at the plan boundary")
+        let history = await engine.history
+        XCTAssertEqual(history.cpu.count, 0)
+    }
+
+    @MainActor
+    func testStoreClearsPriorSnapshotImmediatelyAcrossDisableAndReenable() async throws {
+        let name = "monitoring-store-stale-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let settings = MonitoringSettings(defaults: defaults)
+        let engine = selectiveEngine(calls: SelectionCalls(), selection: Set(MetricSection.allCases))
+        let store = MonitoringStore(settings: settings, engine: engine)
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while store.snapshot == nil && ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertNotNil(store.snapshot)
+        settings.set(.cpu, enabled: false)
+        XCTAssertNil(store.snapshot, "Disabled selection must not leave prior readings in the Store")
+        settings.set(.cpu, enabled: true)
+        XCTAssertNil(store.snapshot, "Reenable must not display the pre-disable reading before a fresh sample")
+        XCTAssertEqual(MenuBarPresentation(snapshot: store.snapshot, selection: store.selection).text,
+                       "C —   M —   ↑ —   ↓ —")
+        store.stop()
+    }
+
+    @MainActor
+    func testStoreStartsWithPersistedAllOffSelectionAndForwardsRapidChangesInOrder() async throws {
+        let name = "monitoring-store-selection-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        let settings = MonitoringSettings(defaults: defaults)
+        for section in MetricSection.allCases { settings.set(section, enabled: false) }
+        let calls = SelectionCalls()
+        let engine = selectiveEngine(calls: calls, selection: Set(MetricSection.allCases))
+        let store = MonitoringStore(settings: settings, engine: engine)
+        XCTAssertTrue(store.selection.isEmpty)
+        XCTAssertNil(store.snapshot)
+        let initial = await MonitoringChecks.waitUntil { await engine.configuration.selection.isEmpty }
+        XCTAssertTrue(initial)
+        try await Task.sleep(for: .milliseconds(50))
+        let initialCalls = await calls.counts
+        XCTAssertTrue(initialCalls.isEmpty, "No old all-selected sample may run before restored settings apply")
+        settings.set(.cpu, enabled: true)
+        settings.set(.cpu, enabled: false)
+        settings.set(.download, enabled: true)
+        let settled = await MonitoringChecks.waitUntil {
+            let selection = await engine.configuration.selection
+            return selection.contains(.download) && !selection.contains(.cpu)
+        }
+        XCTAssertTrue(settled)
+        XCTAssertEqual(store.selection, settings.selection)
+        store.stop()
+        let restored = MonitoringSettings(defaults: defaults)
+        let rebuilt = MonitoringStore(settings: restored,
+            engine: selectiveEngine(calls: SelectionCalls(), selection: Set(MetricSection.allCases)))
+        XCTAssertNil(rebuilt.snapshot)
+        XCTAssertEqual(MenuBarPresentation(snapshot: rebuilt.snapshot, selection: rebuilt.selection).text, "↓ —")
+        rebuilt.stop()
+    }
+
     // Sleep must actively cancel collection and drain cleanup before either the
     // abandoned result returns or a post-wake collection starts.
     func testSleepCancelsProcessSamplingAndAwaitsCleanupBeforeWakeSampling() async throws {
@@ -194,6 +406,43 @@ final class MonitoringEngineTests: XCTestCase {
         XCTAssertTrue(drained)
         XCTAssertEqual(system, ["processListFailed", nil, nil])
         XCTAssertEqual(network, [nil, "nettopTimedOut", nil])
+    }
+
+    func testTemperatureFailureWithSuccessfulFanLogsFailureThenRecovery() async {
+        let logger = ProcessDiagnosticRecorder()
+        let engine = MonitoringEngine(providers: ProviderSet(
+            cpu: FakeCPUProvider(), memory: FakeMemoryProvider(fails: false),
+            network: FakeNetworkProvider(), disk: FakeDiskProvider(),
+            sensors: RecoveringTemperatureSensor(), processes: FakeProcessMetricsProvider()), logger: logger)
+        let failed = await engine.sample(at: Date(timeIntervalSince1970: 1))
+        let recovered = await engine.sample(at: Date(timeIntervalSince1970: 2))
+        let drained = await MonitoringChecks.waitUntil { await logger.events.count == 14 }
+        let sensors = await logger.events.filter { $0.component == .sensors }
+        XCTAssertTrue(drained)
+        XCTAssertTrue(failed.temperature.isUnavailable)
+        XCTAssertEqual(failed.fan.value, .fanless)
+        XCTAssertEqual(recovered.temperature.value, 42)
+        XCTAssertEqual(recovered.fan.value, .fanless)
+        XCTAssertEqual(sensors.map(\.failure), ["temperatureUnavailable", nil])
+    }
+
+    func testHistoryClockRollbackWithoutCPUSeparatesAllActiveCurvesAfterTrimming() {
+        var selection = MetricSelection.all
+        selection.set(.cpu, enabled: false)
+        var history = MetricHistory(historyDuration: .fiveMinutes)
+        for second in [100.0, 109.0, 106.0] {
+            history.append(.fixture(at: second), selection: selection)
+        }
+        XCTAssertEqual(history.cpu.count, 0)
+        for points in [history.memory.elements, history.upload.elements, history.download.elements] {
+            XCTAssertEqual(points.map(\.timestamp.timeIntervalSince1970), [100, 106])
+            XCTAssertEqual(points.map(\.startsNewSegment), [false, true])
+        }
+        history.updateDuration(.oneMinute, endingAt: Date(timeIntervalSince1970: 166))
+        for points in [history.memory.elements, history.upload.elements, history.download.elements] {
+            XCTAssertEqual(points.map(\.timestamp.timeIntervalSince1970), [106])
+            XCTAssertEqual(points.map(\.startsNewSegment), [true])
+        }
     }
 
     func testProcessDiagnosticCategoriesAreSafeDeduplicatedAndRecoverable() async throws {
@@ -425,6 +674,72 @@ private func require(_ condition: Bool, _ message: String) throws {
     if !condition { throw MonitoringTestError.assertion(message) }
 }
 
+private actor SelectionCalls {
+    private(set) var counts: [String: Int] = [:]
+    func hit(_ name: String) { counts[name, default: 0] += 1 }
+}
+
+private func selectiveEngine(calls: SelectionCalls, selection sections: Set<MetricSection>) -> MonitoringEngine {
+    var selection = MetricSelection.all
+    for section in MetricSection.allCases { selection.set(section, enabled: sections.contains(section)) }
+    let providers = ProviderSet(cpu: SelectionCPU(calls: calls), memory: SelectionMemory(calls: calls),
+        network: SelectionNetwork(calls: calls), disk: SelectionDisk(calls: calls),
+        sensors: SelectionSensors(calls: calls), processes: SelectionProcesses(calls: calls))
+    return MonitoringEngine(providers: providers, logger: SilentDiagnosticLogger(),
+        configuration: .init(refreshInterval: .oneSecond, historyDuration: .fiveMinutes, selection: selection))
+}
+
+private struct SelectionCPU: CPUProviding {
+    let calls: SelectionCalls
+    func sample() async -> CPUTicks {
+        await calls.hit("cpu")
+        return .init(user: 10, system: 10, nice: 0, idle: 80)
+    }
+}
+private struct SelectionMemory: MemoryProviding {
+    let calls: SelectionCalls
+    func sample() async -> MemoryMetric {
+        await calls.hit("memory")
+        return .init(usage: 0.5, usedBytes: 50, totalBytes: 100)
+    }
+}
+private struct SelectionNetwork: NetworkProviding {
+    let calls: SelectionCalls
+    func sample() async -> NetworkCounters {
+        await calls.hit("network")
+        return .init(received: 100, sent: 50, interfaces: ["en0"])
+    }
+}
+private struct SelectionDisk: DiskProviding {
+    let calls: SelectionCalls
+    func sample() async -> DiskMetric {
+        await calls.hit("disk")
+        return .init(usedBytes: 50, totalBytes: 100)
+    }
+}
+private struct SelectionSensors: SensorProviding {
+    let calls: SelectionCalls
+    func sample() -> ThermalMetric { .init(chipTemperatureCelsius: 40, fan: .fanless) }
+    func sample(temperature: Bool, fan: Bool) async -> SensorReadings {
+        if temperature { await calls.hit("temperature") }
+        if fan { await calls.hit("fan") }
+        return .init(temperature: temperature ? .value(40) : .unavailable("notSelected"),
+                     fan: fan ? .value(.fanless) : .unavailable("notSelected"))
+    }
+}
+private actor SelectionProcesses: ProcessMetricsProviding {
+    let calls: SelectionCalls
+    init(calls: SelectionCalls) { self.calls = calls }
+    func sample() async -> ProcessRawSnapshot { await sample(system: true, network: true) }
+    func sample(system: Bool, network: Bool) async -> ProcessRawSnapshot {
+        if system { await calls.hit("processSystem") }
+        if network { await calls.hit("processNetwork") }
+        return .init(system: system ? .value([]) : .unavailable("notSelected"),
+                     network: network ? .value([]) : .unavailable("notSelected"))
+    }
+    func cancel() async {}
+}
+
 private struct FakeCPUProvider: CPUProviding {
     var result: Result<CPUTicks, MonitoringTestError> = .success(.init(user: 10, system: 10, nice: 0, idle: 80))
     func sample() throws -> CPUTicks { try result.get() }
@@ -575,12 +890,25 @@ private actor FakeDiskProvider: DiskProviding {
     }
 }
 
+private actor RecoveringTemperatureSensor: SensorProviding {
+    private var attempt = 0
+    func sample() -> ThermalMetric { .init(chipTemperatureCelsius: 42, fan: .fanless) }
+    func sample(temperature: Bool, fan: Bool) -> SensorReadings {
+        attempt += 1
+        return .init(temperature: temperature
+                     ? (attempt == 1 ? .unavailable("temperatureUnavailable") : .value(42))
+                     : .unavailable("notSelected"),
+                     fan: fan ? .value(.fanless) : .unavailable("notSelected"))
+    }
+}
+
 private struct FakeSensorProvider: SensorProviding {
     var fails = false
     var fan: FanMetric = .fanless
+    var temperature: Double? = 42
     func sample() throws -> ThermalMetric {
         if fails { throw MonitoringTestError.failed }
-        return ThermalMetric(chipTemperatureCelsius: nil, fan: fan)
+        return ThermalMetric(chipTemperatureCelsius: temperature, fan: fan)
     }
 }
 
@@ -1023,7 +1351,8 @@ private enum MonitoringChecks {
 
     // Fails if a thrown memory read cancels other providers, or nil temperature becomes unavailable.
     static func failureIsolation() async throws {
-        let engine = makeEngine(providers: providers(cpu: AdvancingCPUProvider()))
+        let engine = makeEngine(providers: providers(sensors: FakeSensorProvider(temperature: nil),
+                                                     cpu: AdvancingCPUProvider()))
         _ = await engine.sample(at: Date(timeIntervalSince1970: 0))
         let snapshot = await engine.sample(at: Date(timeIntervalSince1970: 1))
         try require(snapshot.cpuUsage.value == 0.3, "CPU survives memory failure")

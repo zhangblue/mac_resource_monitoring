@@ -48,9 +48,12 @@ struct ProcessRankingCalculator {
     private var previousNetwork: (counters: [ProcessIdentity: ProcessNetworkCounter], timestamp: Date)?
 
     mutating func resetRates() {
-        previousSystem = nil
-        previousNetwork = nil
+        resetSystemRates()
+        resetNetworkRates()
     }
+
+    mutating func resetSystemRates() { previousSystem = nil }
+    mutating func resetNetworkRates() { previousNetwork = nil }
 
     mutating func update(
         system: Reading<[ProcessSystemCounter]>, network: Reading<[ProcessNetworkCounter]>, at timestamp: Date

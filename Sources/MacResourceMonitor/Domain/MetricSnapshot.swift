@@ -49,17 +49,24 @@ struct MetricSnapshot: Sendable {
     let memory: Reading<MemoryMetric>
     let network: Reading<NetworkMetric>
     let thermal: Reading<ThermalMetric>
+    // The combined legacy reading cannot represent independent sensor failures.
+    let temperature: Reading<Double>
+    let fan: Reading<FanMetric>
     let disk: Reading<DiskMetric>
     let processes: ProcessRankings
 
     init(timestamp: Date, cpuUsage: Reading<Double>, memory: Reading<MemoryMetric>,
          network: Reading<NetworkMetric>, thermal: Reading<ThermalMetric>, disk: Reading<DiskMetric>,
-         processes: ProcessRankings = .waiting()) {
+         processes: ProcessRankings = .waiting(),
+         temperature: Reading<Double>? = nil, fan: Reading<FanMetric>? = nil) {
         self.timestamp = timestamp
         self.cpuUsage = cpuUsage
         self.memory = memory
         self.network = network
         self.thermal = thermal
+        self.temperature = temperature ?? thermal.value?.chipTemperatureCelsius.map(Reading.value)
+            ?? .unavailable("temperatureUnavailable")
+        self.fan = fan ?? thermal.value.map { .value($0.fan) } ?? .unavailable("fanUnavailable")
         self.disk = disk
         self.processes = processes
     }

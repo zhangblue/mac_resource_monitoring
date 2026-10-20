@@ -5,15 +5,19 @@ struct MenuBarPresentation {
     let memory: Reading<Double>
     let upload: Reading<Double>
     let download: Reading<Double>
+    let selection: MetricSelection
 
-    init(cpu: Reading<Double>, memory: Reading<Double>, upload: Reading<Double>, download: Reading<Double>) {
+    init(cpu: Reading<Double>, memory: Reading<Double>, upload: Reading<Double>, download: Reading<Double>,
+         selection: MetricSelection = .all) {
         self.cpu = cpu
         self.memory = memory
         self.upload = upload
         self.download = download
+        self.selection = selection
     }
 
-    init(snapshot: MetricSnapshot?) {
+    init(snapshot: MetricSnapshot?, selection: MetricSelection = .all) {
+        self.selection = selection
         cpu = snapshot?.cpuUsage ?? .unavailable("等待下一次采样")
         memory = snapshot?.memory.map(\.usage) ?? .unavailable("等待下一次采样")
         upload = snapshot?.network.map { $0.uploadBytesPerSecond }.flatMap ?? .unavailable("等待下一次采样")
@@ -21,7 +25,12 @@ struct MenuBarPresentation {
     }
 
     var text: String {
-        "C \(Self.compactPercent(cpu))   M \(Self.compactPercent(memory))   ↑ \(Self.compactRate(upload))   ↓ \(Self.compactRate(download))"
+        var parts: [String] = []
+        if selection.contains(.cpu) { parts.append("C \(Self.compactPercent(cpu))") }
+        if selection.contains(.memory) { parts.append("M \(Self.compactPercent(memory))") }
+        if selection.contains(.upload) { parts.append("↑ \(Self.compactRate(upload))") }
+        if selection.contains(.download) { parts.append("↓ \(Self.compactRate(download))") }
+        return parts.isEmpty ? "监控" : parts.joined(separator: "   ")
     }
 
     static func compactPercent(_ reading: Reading<Double>) -> String {
@@ -101,6 +110,12 @@ enum MetricPresentation {
         case let .unavailable(reason):
             return reason == "等待 CPU 采样基线" ? "等待下一次采样" : "暂不可用"
         }
+    }
+
+    static func temperatureReadingStatus(for reading: Reading<Double>?) -> String {
+        guard let reading else { return "等待下一次采样" }
+        guard let value = reading.value, value.isFinite else { return "暂不可用" }
+        return ""
     }
 
     static func temperatureStatus(for reading: Reading<ThermalMetric>?) -> String {

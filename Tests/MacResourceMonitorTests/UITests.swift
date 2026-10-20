@@ -98,6 +98,54 @@ final class UITests: XCTestCase {
         XCTAssertEqual(model.text, "C 24%   M 61%   ↑ 1.2M   ↓ 8.4M")
     }
 
+    func testMenuBarSelectionHidesDisabledTotalsAndKeepsClickableEmptyLabel() {
+        let snapshot = MetricSnapshot(timestamp: Date(), cpuUsage: .value(0.24),
+            memory: .value(.init(usage: 0.61, usedBytes: 61, totalBytes: 100)),
+            network: .value(.init(downloadBytesPerSecond: 8_400_000, uploadBytesPerSecond: 1_200_000)),
+            thermal: .unavailable("not used"), disk: .unavailable("not used"))
+        var selection = MetricSelection.all
+        for section in [.cpu, .memory, .upload, .download] as [MetricSection] {
+            selection.set(section, enabled: false)
+            let text = MenuBarPresentation(snapshot: snapshot, selection: selection).text
+            XCTAssertFalse(text.components(separatedBy: "   ").contains {
+                $0.hasPrefix([MetricSection.cpu: "C ", .memory: "M ",
+                              .upload: "↑ ", .download: "↓ "][section]!)
+            })
+        }
+        XCTAssertEqual(MenuBarPresentation(snapshot: snapshot, selection: selection).text, "监控")
+        selection.set(.cpu, enabled: true)
+        XCTAssertEqual(MenuBarPresentation(snapshot: snapshot, selection: selection).text, "C 24%")
+        selection.set(.chipTemperature, enabled: false)
+        selection.set(.fan, enabled: false)
+        selection.set(.diskCapacity, enabled: false)
+        selection.set(.cpu, enabled: false)
+        XCTAssertTrue(selection.isEmpty)
+        XCTAssertEqual(MenuBarPresentation(snapshot: snapshot, selection: selection).text, "监控")
+    }
+
+    func testSevenSettingsLabelsAndIndependentSensorStatus() {
+        XCTAssertEqual(MetricSection.allCases.map(\.settingsLabel),
+                       ["CPU", "内存", "上传", "下载", "芯片温度", "风扇", "磁盘容量"])
+        XCTAssertEqual(MetricPresentation.temperatureReadingStatus(for: nil), "等待下一次采样")
+        XCTAssertEqual(MetricPresentation.temperatureReadingStatus(for: .unavailable("sensor failed")), "暂不可用")
+        XCTAssertEqual(MetricPresentation.temperatureReadingStatus(for: .value(43)), "")
+    }
+
+    func testDashboardVisibleSectionsFollowSevenIndependentSwitches() {
+        var selection = MetricSelection.all
+        for section in MetricSection.allCases {
+            selection.set(section, enabled: false)
+            XCTAssertFalse(DashboardPresentation(selection: selection).visibleSections.contains(section))
+            for peer in MetricSection.allCases where peer != section {
+                XCTAssertTrue(DashboardPresentation(selection: selection).visibleSections.contains(peer))
+            }
+            selection.set(section, enabled: true)
+        }
+        for section in MetricSection.allCases { selection.set(section, enabled: false) }
+        XCTAssertTrue(DashboardPresentation(selection: selection).isEmpty)
+        XCTAssertTrue(DashboardPresentation(selection: .all).visibleSections.count == 7)
+    }
+
     func testUnavailableReadingUsesDash() {
         XCTAssertEqual(MenuBarPresentation.compactPercent(.unavailable("read failed")), "—")
         XCTAssertEqual(MenuBarPresentation.compactRate(.unavailable("read failed")), "—")

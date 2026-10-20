@@ -13,19 +13,38 @@ struct MetricHistory: Sendable {
         self.historyDuration = historyDuration
     }
 
-    mutating func append(_ snapshot: MetricSnapshot) {
+    mutating func append(_ snapshot: MetricSnapshot, selection: MetricSelection = .all) {
         let date = snapshot.timestamp
-        // Record clock discontinuity before trimming can remove the preceding future sample.
-        let startsNewSegment = cpu.elements.last.map { date <= $0.timestamp } ?? false
-        cpu.append(HistoryPoint(timestamp: date, value: snapshot.cpuUsage.value,
-                                startsNewSegment: startsNewSegment))
-        memory.append(HistoryPoint(timestamp: date, value: snapshot.memory.value?.usage,
-                                   startsNewSegment: startsNewSegment))
-        upload.append(HistoryPoint(timestamp: date, value: snapshot.network.value?.uploadBytesPerSecond,
-                                   startsNewSegment: startsNewSegment))
-        download.append(HistoryPoint(timestamp: date, value: snapshot.network.value?.downloadBytesPerSecond,
-                                     startsNewSegment: startsNewSegment))
+        // Mark each active curve from its own previous sample before trimming
+        // removes points in the rolled-back future (including when CPU is off).
+        func startsNewSegment(_ buffer: RingBuffer<HistoryPoint>) -> Bool {
+            buffer.elements.last.map { date <= $0.timestamp } ?? false
+        }
+        if selection.contains(.cpu) {
+            cpu.append(HistoryPoint(timestamp: date, value: snapshot.cpuUsage.value,
+                                    startsNewSegment: startsNewSegment(cpu)))
+        }
+        if selection.contains(.memory) {
+            memory.append(HistoryPoint(timestamp: date, value: snapshot.memory.value?.usage,
+                                       startsNewSegment: startsNewSegment(memory)))
+        }
+        if selection.contains(.upload) {
+            upload.append(HistoryPoint(timestamp: date, value: snapshot.network.value?.uploadBytesPerSecond,
+                                       startsNewSegment: startsNewSegment(upload)))
+        }
+        if selection.contains(.download) {
+            download.append(HistoryPoint(timestamp: date, value: snapshot.network.value?.downloadBytesPerSecond,
+                                         startsNewSegment: startsNewSegment(download)))
+        }
         trim(endingAt: date)
+    }
+
+    mutating func clearDisabled(_ selection: MetricSelection) {
+        durationRevision = UUID() // Also invalidates delayed pre-selection publications.
+        if !selection.contains(.cpu) { cpu.replaceContents(with: [HistoryPoint]()) }
+        if !selection.contains(.memory) { memory.replaceContents(with: [HistoryPoint]()) }
+        if !selection.contains(.upload) { upload.replaceContents(with: [HistoryPoint]()) }
+        if !selection.contains(.download) { download.replaceContents(with: [HistoryPoint]()) }
     }
 
     mutating func updateDuration(_ duration: HistoryDuration, endingAt end: Date?) {
@@ -49,6 +68,30 @@ struct MonitoringUpdate: Sendable {
     let history: MetricHistory
 }
 
+private struct CollectionPlan: Sendable {
+    let selection: MetricSelection
+    func includes(_ section: MetricSection) -> Bool { selection.contains(section) }
+    var network: Bool { includes(.upload) || includes(.download) }
+    var sensors: Bool { includes(.chipTemperature) || includes(.fan) }
+    var systemProcesses: Bool { includes(.cpu) || includes(.memory) }
+}
+
+private final class PlanRevisionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var revision: UUID
+    init(_ revision: UUID) { self.revision = revision }
+    func set(_ value: UUID) {
+        lock.lock()
+        revision = value
+        lock.unlock()
+    }
+    func contains(_ value: UUID) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return revision == value
+    }
+}
+
 actor MonitoringEngine {
     private let providers: ProviderSet
     private let logger: any DiagnosticLogging
@@ -61,6 +104,14 @@ actor MonitoringEngine {
     private var intervalWait: Task<Void, Never>?
     private var intervalWaitID: UUID?
     private var generation = UUID()
+    private var planRevision: UUID
+    private let diagnosticGate: PlanRevisionGate
+    private var selectionCleanup: Task<Void, Never>?
+    private var needsUploadBaseline = false
+    private var needsDownloadBaseline = false
+    private var needsCPUProcessBaseline = false
+    private var needsUploadProcessBaseline = false
+    private var needsDownloadProcessBaseline = false
     private var sampling: Task<MonitoringUpdate, Never>?
     private var samplingID: UUID?
     private var loggingTail: Task<Void, Never>?
@@ -79,6 +130,9 @@ actor MonitoringEngine {
         self.sleepMonitor = sleepMonitor
         sleepMonitor.setSleepHandler { [processes = providers.processes] in await processes.cancel() }
         self.configuration = configuration
+        let revision = UUID()
+        planRevision = revision
+        diagnosticGate = PlanRevisionGate(revision)
         history = MetricHistory(historyDuration: configuration.historyDuration)
     }
 
@@ -135,13 +189,52 @@ actor MonitoringEngine {
         let continuations = Array(subscribers.values)
         subscribers.removeAll()
         continuations.forEach { $0.finish() }
+        await selectionCleanup?.value
+        selectionCleanup = nil
         await providers.processes.cancel()
     }
 
     func updateConfiguration(_ newValue: MonitoringConfiguration) {
         let intervalChanged = configuration.refreshInterval != newValue.refreshInterval
         let historyChanged = configuration.historyDuration != newValue.historyDuration
+        let selectionChanged = configuration.selection != newValue.selection
+        let oldPlan = CollectionPlan(selection: configuration.selection)
+        let plan = CollectionPlan(selection: newValue.selection)
         configuration = newValue
+        if selectionChanged {
+            planRevision = UUID()
+            diagnosticGate.set(planRevision)
+            sampling?.cancel()
+            // Cancel process work before a new plan can enter the provider.
+            let priorCleanup = selectionCleanup
+            let processes = providers.processes
+            selectionCleanup = Task {
+                await priorCleanup?.value
+                await processes.cancel()
+            }
+            if !plan.includes(.cpu) { previousCPU = nil }
+            if !plan.network { networkCalculator = NetworkRateCalculator() }
+            if !plan.systemProcesses { processCalculator.resetSystemRates() }
+            if !plan.network { processCalculator.resetNetworkRates() }
+            needsCPUProcessBaseline = plan.includes(.cpu) &&
+                (needsCPUProcessBaseline || !oldPlan.includes(.cpu))
+            needsUploadBaseline = plan.includes(.upload) &&
+                (needsUploadBaseline || !oldPlan.includes(.upload))
+            needsDownloadBaseline = plan.includes(.download) &&
+                (needsDownloadBaseline || !oldPlan.includes(.download))
+            needsUploadProcessBaseline = plan.includes(.upload) &&
+                (needsUploadProcessBaseline || !oldPlan.includes(.upload))
+            needsDownloadProcessBaseline = plan.includes(.download) &&
+                (needsDownloadProcessBaseline || !oldPlan.includes(.download))
+            history.clearDisabled(newValue.selection)
+            if let latestSnapshot {
+                self.latestSnapshot = Self.filtered(latestSnapshot, plan: plan)
+            }
+            if let latestSnapshot = self.latestSnapshot {
+                subscribers.values.forEach { $0.yield(.init(snapshot: latestSnapshot, history: history)) }
+            }
+            intervalWait?.cancel()
+        }
         if historyChanged {
             history.updateDuration(newValue.historyDuration, endingAt: latestSnapshot?.timestamp)
             if let latestSnapshot {
@@ -182,20 +275,25 @@ actor MonitoringEngine {
     private func sampledUpdate(at date: Date) async -> MonitoringUpdate {
         let predecessor = sampling
         let token = generation
+        let revision = planRevision
+        let plan = CollectionPlan(selection: configuration.selection)
+        let cleanup = selectionCleanup
         let id = UUID()
         let providers = providers
         let sleepMonitor = sleepMonitor
         let cancelled = MonitoringUpdate(snapshot: Self.cancelledSnapshot(at: date), history: history)
         let task = Task { [weak self] in
+            await cleanup?.value
             _ = await predecessor?.value
             await sleepMonitor.waitForSleepCleanup()
-            guard !Task.isCancelled, await self?.isCurrent(token) == true else { return cancelled }
+            guard !Task.isCancelled, await self?.isCurrent(token, revision: revision) == true else { return cancelled }
             guard let sleepState = self?.sleepMonitor.snapshot(), !sleepState.isSleeping else {
                 return cancelled
             }
-            let readings = await Self.collect(providers)
+            let readings = await Self.collect(providers, plan: plan)
             await sleepMonitor.waitForSleepCleanup()
-            return await self?.commit(readings, at: date, generation: token, sleepState: sleepState) ?? cancelled
+            return await self?.commit(readings, at: date, generation: token, revision: revision,
+                                      plan: plan, sleepState: sleepState) ?? cancelled
         }
         sampling = task
         samplingID = id
@@ -224,7 +322,9 @@ actor MonitoringEngine {
         for continuation in subscribers.values { continuation.yield(update) }
     }
 
-    private func isCurrent(_ token: UUID) -> Bool { generation == token }
+    private func isCurrent(_ token: UUID, revision: UUID) -> Bool {
+        generation == token && planRevision == revision
+    }
 
     private static func cancelledSnapshot(at date: Date) -> MetricSnapshot {
         MetricSnapshot(timestamp: date, cpuUsage: .unavailable("采样已取消"),
@@ -249,24 +349,34 @@ actor MonitoringEngine {
         let memory: Reading<MemoryMetric>
         let network: Reading<NetworkCounters>
         let disk: Reading<DiskMetric>
-        let thermal: Reading<ThermalMetric>
+        let sensors: SensorReadings
         let processes: ProcessRawSnapshot
     }
 
-    private static func collect(_ providers: ProviderSet) async -> ProviderReadings {
-        async let cpu = Self.read { try await providers.cpu.sample() }
-        async let memory = Self.read { try await providers.memory.sample() }
-        async let network = Self.read { try await providers.network.sample() }
-        async let disk = Self.read { try await providers.disk.sample() }
-        async let thermal = Self.read { try await providers.sensors.sample() }
-        async let processes = providers.processes.sample()
+    private static func collect(_ providers: ProviderSet, plan: CollectionPlan) async -> ProviderReadings {
+        async let cpu: Reading<CPUTicks> = plan.includes(.cpu)
+            ? Self.read { try await providers.cpu.sample() } : .unavailable("notSelected")
+        async let memory: Reading<MemoryMetric> = plan.includes(.memory)
+            ? Self.read { try await providers.memory.sample() } : .unavailable("notSelected")
+        async let network: Reading<NetworkCounters> = plan.network
+            ? Self.read { try await providers.network.sample() } : .unavailable("notSelected")
+        async let disk: Reading<DiskMetric> = plan.includes(.diskCapacity)
+            ? Self.read { try await providers.disk.sample() } : .unavailable("notSelected")
+        async let sensors: SensorReadings = plan.sensors
+            ? providers.sensors.sample(temperature: plan.includes(.chipTemperature), fan: plan.includes(.fan))
+            : .init(temperature: .unavailable("notSelected"), fan: .unavailable("notSelected"))
+        async let processes: ProcessRawSnapshot = (plan.systemProcesses || plan.network)
+            ? providers.processes.sample(system: plan.systemProcesses, network: plan.network)
+            : .init(system: .unavailable("notSelected"), network: .unavailable("notSelected"))
         return await ProviderReadings(cpu: cpu, memory: memory, network: network,
-                                      disk: disk, thermal: thermal, processes: processes)
+                                      disk: disk, sensors: sensors, processes: processes)
     }
 
     private func commit(_ readings: ProviderReadings, at date: Date,
-                        generation token: UUID, sleepState: SystemSleepMonitor.State) -> MonitoringUpdate {
-        guard generation == token, !Task.isCancelled, sleepState == sleepMonitor.snapshot() else {
+                        generation token: UUID, revision: UUID, plan: CollectionPlan,
+                        sleepState: SystemSleepMonitor.State) -> MonitoringUpdate {
+        guard generation == token, planRevision == revision, !Task.isCancelled,
+              sleepState == sleepMonitor.snapshot() else {
             return MonitoringUpdate(snapshot: Self.cancelledSnapshot(at: date), history: history)
         }
 
@@ -279,35 +389,109 @@ actor MonitoringEngine {
             baselineSleepGeneration = sleepState.generation
         }
 
-        let processes = processCalculator.update(system: readings.processes.system,
-                                                network: readings.processes.network, at: date)
-        let snapshot = MetricSnapshot(timestamp: date, cpuUsage: cpuUsage(readings.cpu),
-                                      memory: readings.memory, network: networkMetric(readings.network, at: date),
-                                      thermal: readings.thermal, disk: readings.disk, processes: processes)
-        history.append(snapshot)
+        var processes = processCalculator.update(system: readings.processes.system,
+                                                 network: readings.processes.network, at: date)
+        if needsCPUProcessBaseline && readings.processes.system.value != nil {
+            processes = .init(cpu: .unavailable("等待进程采样基线"), memory: processes.memory,
+                              upload: processes.upload, download: processes.download)
+            needsCPUProcessBaseline = false
+        }
+        if needsUploadProcessBaseline && readings.processes.network.value != nil {
+            processes = .init(cpu: processes.cpu, memory: processes.memory,
+                              upload: .unavailable("等待进程采样基线"), download: processes.download)
+            needsUploadProcessBaseline = false
+        }
+        if needsDownloadProcessBaseline && readings.processes.network.value != nil {
+            processes = .init(cpu: processes.cpu, memory: processes.memory,
+                              upload: processes.upload, download: .unavailable("等待进程采样基线"))
+            needsDownloadProcessBaseline = false
+        }
+        let sensors = readings.sensors
+        let thermal: Reading<ThermalMetric> = sensors.fan.value.map {
+            .value(.init(chipTemperatureCelsius: sensors.temperature.value, fan: $0))
+        } ?? .unavailable("notSelected")
+        let snapshot = Self.filtered(MetricSnapshot(timestamp: date, cpuUsage: cpuUsage(readings.cpu),
+            memory: readings.memory, network: networkMetric(readings.network, at: date),
+            thermal: thermal, disk: readings.disk, processes: processes,
+            temperature: sensors.temperature, fan: sensors.fan), plan: plan)
+        history.append(snapshot, selection: plan.selection)
         latestSnapshot = snapshot
-        enqueueDiagnostics(readings, at: date)
+        enqueueDiagnostics(readings, plan: plan, revision: revision, at: date)
         return MonitoringUpdate(snapshot: snapshot, history: history)
     }
 
-    private func enqueueDiagnostics(_ readings: ProviderReadings, at date: Date) {
+    private static func filtered(_ snapshot: MetricSnapshot, plan: CollectionPlan) -> MetricSnapshot {
+        let missing = "notSelected"
+        let upload = plan.includes(.upload)
+        let download = plan.includes(.download)
+        let network: Reading<NetworkMetric> = plan.network ? snapshot.network.value.map {
+            .value(.init(downloadBytesPerSecond: download ? $0.downloadBytesPerSecond : nil,
+                         uploadBytesPerSecond: upload ? $0.uploadBytesPerSecond : nil))
+        } ?? snapshot.network : .unavailable(missing)
+        let temperature: Reading<Double> = plan.includes(.chipTemperature)
+            ? snapshot.temperature : .unavailable(missing)
+        let fan: Reading<FanMetric> = plan.includes(.fan) ? snapshot.fan : .unavailable(missing)
+        let thermal: Reading<ThermalMetric> = fan.value.map {
+            .value(.init(chipTemperatureCelsius: temperature.value, fan: $0))
+        } ?? .unavailable(missing)
+        let ranks = snapshot.processes
+        return .init(timestamp: snapshot.timestamp,
+            cpuUsage: plan.includes(.cpu) ? snapshot.cpuUsage : .unavailable(missing),
+            memory: plan.includes(.memory) ? snapshot.memory : .unavailable(missing),
+            network: network, thermal: thermal,
+            disk: plan.includes(.diskCapacity) ? snapshot.disk : .unavailable(missing),
+            processes: .init(cpu: plan.includes(.cpu) ? ranks.cpu : .unavailable(missing),
+                memory: plan.includes(.memory) ? ranks.memory : .unavailable(missing),
+                upload: upload ? ranks.upload : .unavailable(missing),
+                download: download ? ranks.download : .unavailable(missing)),
+            temperature: temperature, fan: fan)
+    }
+
+    private func enqueueDiagnostics(_ readings: ProviderReadings, plan: CollectionPlan,
+                                    revision: UUID, at date: Date) {
         let predecessor = loggingTail
         let logger = logger
+        let gate = diagnosticGate
         loggingTail = Task.detached {
             _ = await predecessor?.value
-            await Self.recordDiagnostics(readings, at: date, logger: logger)
+            let isCurrent: @Sendable () async -> Bool = { gate.contains(revision) }
+            await Self.recordDiagnostics(readings, plan: plan, at: date, logger: logger, isCurrent: isCurrent)
         }
     }
 
-    nonisolated private static func recordDiagnostics(_ readings: ProviderReadings, at date: Date,
-                                                      logger: any DiagnosticLogging) async {
-        await record(.cpu, reading: readings.cpu, at: date, logger: logger)
-        await record(.memory, reading: readings.memory, at: date, logger: logger)
-        await record(.network, reading: readings.network, at: date, logger: logger)
-        await record(.disk, reading: readings.disk, at: date, logger: logger)
-        await record(.sensors, reading: readings.thermal, at: date, logger: logger)
-        await record(.processSystem, reading: readings.processes.system, at: date, logger: logger)
-        await record(.processNetwork, reading: readings.processes.network, at: date, logger: logger)
+    nonisolated private static func recordDiagnostics(_ readings: ProviderReadings, plan: CollectionPlan,
+        at date: Date, logger: any DiagnosticLogging,
+        isCurrent: @escaping @Sendable () async -> Bool) async {
+        if plan.includes(.cpu), await isCurrent() {
+            await record(.cpu, reading: readings.cpu, at: date, logger: logger)
+        }
+        if plan.includes(.memory), await isCurrent() {
+            await record(.memory, reading: readings.memory, at: date, logger: logger)
+        }
+        if plan.network, await isCurrent() {
+            await record(.network, reading: readings.network, at: date, logger: logger)
+        }
+        if plan.includes(.diskCapacity), await isCurrent() {
+            await record(.disk, reading: readings.disk, at: date, logger: logger)
+        }
+        if plan.sensors, await isCurrent() {
+            let sensor: Reading<Bool>
+            if plan.includes(.chipTemperature),
+               case let .unavailable(reason) = readings.sensors.temperature {
+                sensor = .unavailable(reason)
+            } else if plan.includes(.fan), case let .unavailable(reason) = readings.sensors.fan {
+                sensor = .unavailable(reason)
+            } else {
+                sensor = .value(true)
+            }
+            await record(.sensors, reading: sensor, at: date, logger: logger)
+        }
+        if plan.systemProcesses, await isCurrent() {
+            await record(.processSystem, reading: readings.processes.system, at: date, logger: logger)
+        }
+        if plan.network, await isCurrent() {
+            await record(.processNetwork, reading: readings.processes.network, at: date, logger: logger)
+        }
     }
 
     nonisolated private static func record<Value>(_ component: DiagnosticComponent, reading: Reading<Value>,
@@ -341,8 +525,14 @@ actor MonitoringEngine {
             networkCalculator = NetworkRateCalculator()
             return .unavailable(reason)
         case let .value(counters):
-            return .value(networkCalculator.update(counters, at: date)
-                          ?? NetworkMetric(downloadBytesPerSecond: nil, uploadBytesPerSecond: nil))
+            let metric = networkCalculator.update(counters, at: date)
+                ?? NetworkMetric(downloadBytesPerSecond: nil, uploadBytesPerSecond: nil)
+            let result = NetworkMetric(
+                downloadBytesPerSecond: needsDownloadBaseline ? nil : metric.downloadBytesPerSecond,
+                uploadBytesPerSecond: needsUploadBaseline ? nil : metric.uploadBytesPerSecond)
+            needsDownloadBaseline = false
+            needsUploadBaseline = false
+            return .value(result)
         }
     }
 }
