@@ -23,8 +23,8 @@ check_app() {
     plutil -lint "$plist" >/dev/null || fail "invalid Info.plist: $bundle"
     test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")" = "$executable" || fail "incorrect CFBundleExecutable: $bundle"
     test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" = 'com.local.MacResourceMonitor' || fail "incorrect bundle identifier: $bundle"
-    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = '1.3' || fail "incorrect short version: $bundle"
-    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = '3' || fail "incorrect bundle version: $bundle"
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" = '1.2' || fail "incorrect short version: $bundle"
+    test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" = '4' || fail "incorrect bundle version: $bundle"
     test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist")" = '13.0' || fail "incorrect minimum macOS version: $bundle"
     test "$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$plist")" = true || fail "LSUIElement must be true: $bundle"
     local icon_name
