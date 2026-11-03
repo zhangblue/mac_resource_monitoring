@@ -10,6 +10,8 @@ struct SparklineAxisPresentation: Equatable {
     let ticks: [Double]
     let labels: [String]
 
+    /// 根据可见数据生成动态纵轴范围、三条刻度和标签；折线图渲染前调用，无有效值时返回空。
+    /// 先过滤 NaN/无穷值，再为百分比和速率选择不同边界算法；domain、ticks、labels 保持一一对应。
     init?(values: [Double], kind: SparklineAxisKind) {
         let finite = values.filter(\.isFinite)
         guard let minimum = finite.min(), let maximum = finite.max() else { return nil }
@@ -28,6 +30,8 @@ struct SparklineAxisPresentation: Equatable {
         }
     }
 
+    /// 计算动态百分比范围并限制在 0...100%；CPU 或内存纵轴初始化时调用。
+    /// 最小跨度为 10 个百分点，真实跨度额外留 20% 边距；触及 0 或 1 时平移而非压缩范围。
     private static func percentageBounds(minimum: Double, maximum: Double) -> (lower: Double, upper: Double) {
         let boundedMinimum = min(1, max(0, minimum))
         let boundedMaximum = min(1, max(0, maximum))
@@ -47,6 +51,8 @@ struct SparklineAxisPresentation: Equatable {
         return (lower, upper)
     }
 
+    /// 计算含合理留白的网络速率范围；上传或下载纵轴初始化时调用。
+    /// 目标跨度取数据跨度、中心值 20% 和 1 KiB 的最大值，再用 1/2/5/10 步长生成三个刻度。
     private static func rateBounds(minimum: Double, maximum: Double) -> (lower: Double, upper: Double) {
         let midpoint = (minimum + maximum) / 2
         let dataSpan = maximum - minimum
@@ -67,6 +73,7 @@ struct SparklineAxisPresentation: Equatable {
         return (lower, upper)
     }
 
+    /// 将最小步长向上归整为 1/2/5/10 倍数量级；网络纵轴选取易读刻度时调用。
     private static func niceStep(atLeast value: Double) -> Double {
         let magnitude = pow(10, floor(log10(value)))
         let fraction = value / magnitude
@@ -83,6 +90,7 @@ struct SparklineAxisPresentation: Equatable {
         return niceFraction * magnitude
     }
 
+    /// 使用统一单位生成三条速率刻度；网络纵轴范围确定后调用。
     private static func rateLabels(for ticks: [Double], upperBound: Double) -> [String] {
         let (scale, unit): (Double, String)
         if upperBound >= 1_000_000_000 {
@@ -97,6 +105,7 @@ struct SparklineAxisPresentation: Equatable {
         return ticks.map { "\(Self.compact($0 / scale)) \(unit)" }
     }
 
+    /// 将刻度压缩为最多一位小数；生成纵轴标签时调用。
     private static func compact(_ value: Double) -> String {
         let rounded = (value * 10).rounded() / 10
         return rounded.rounded(.towardZero) == rounded ? String(Int(rounded)) : String(format: "%.1f", rounded)

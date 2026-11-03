@@ -4,6 +4,8 @@ struct SparklineHoverSelection: Equatable {
     let timestamp: Date
     let value: Double
 
+    /// 查找时间上最接近鼠标位置的有效历史点；折线图悬停位置变化时调用。
+    /// 单次 O(n) 扫描忽略 nil 和非有限值；等距离时选择较新点，保证向右移动时结果稳定。
     init?(nearestTo target: Date, points: [HistoryPoint]) {
         var nearest: (timestamp: Date, value: Double)?
 
@@ -27,6 +29,7 @@ struct SparklineHoverSelection: Equatable {
         value = nearest.value
     }
 
+    /// 按纵轴类型格式化选中数值；悬停提示框渲染时调用。
     func valueLabel(for kind: SparklineAxisKind) -> String {
         switch kind {
         case .percentage: return MetricFormatter.percent(value * 100)
@@ -34,6 +37,7 @@ struct SparklineHoverSelection: Equatable {
         }
     }
 
+    /// 将选中时间格式化为相对当前点的中文描述；悬停提示框渲染时调用。
     func timeLabel(relativeTo referenceDate: Date) -> String {
         let seconds = max(0, Int(referenceDate.timeIntervalSince(timestamp).rounded()))
         guard seconds > 0 else { return "现在" }

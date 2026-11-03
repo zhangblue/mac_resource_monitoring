@@ -4,21 +4,27 @@ import SwiftUI
 @MainActor
 final class DashboardNavigation: ObservableObject {
     @Published private(set) var showingSettings = false
+    /// 切换到设置页；用户点击详情面板“设置”按钮时调用。
     func openSettings() { showingSettings = true }
+    /// 返回监控首页；用户点击设置页“返回首页”时调用。
     func returnHome() { showingSettings = false }
 }
 
 struct DashboardPresentation {
     let selection: MetricSelection
+    /// 返回当前启用的板块顺序；详情面板计算布局时读取。
     var visibleSections: [MetricSection] {
         MetricSection.allCases.filter { selection.contains($0) }
     }
+    /// 将非磁盘板块按每行两项分组；详情面板渲染卡片网格时读取。
+    /// stride 每次切出最多两个枚举值，磁盘被排除后独占全宽；最后单项行由 Spacer 保持半宽。
     var cardRows: [[MetricSection]] {
         let cards = visibleSections.filter { $0 != .diskCapacity }
         return stride(from: 0, to: cards.count, by: 2).map {
             Array(cards[$0..<min($0 + 2, cards.count)])
         }
     }
+    /// 判断是否没有任何启用板块；详情面板决定是否显示空状态时读取。
     var isEmpty: Bool { visibleSections.isEmpty }
 }
 
@@ -28,13 +34,17 @@ struct DashboardView: View {
     @StateObject private var loginItemManager = LoginItemManager()
     @StateObject private var navigation: DashboardNavigation
 
+    /// 组装监控存储和导航状态；菜单栏详情面板创建或界面测试注入导航器时调用。
+    /// store 作为 ObservedObject 由外部持有，navigation 使用 StateObject 保证面板重绘时导航状态不被重建。
     init(store: MonitoringStore, navigation: DashboardNavigation? = nil) {
         self.store = store
         _navigation = StateObject(wrappedValue: navigation ?? DashboardNavigation())
     }
 
+    /// 根据当前选择生成布局模型；每次 SwiftUI 刷新详情面板时读取。
     private var presentation: DashboardPresentation { .init(selection: store.selection) }
 
+    /// 在监控首页与设置页之间切换；SwiftUI 渲染菜单栏详情窗口时调用。
     var body: some View {
         Group {
             if navigation.showingSettings {
@@ -47,6 +57,7 @@ struct DashboardView: View {
         }
     }
 
+    /// 构建监控首页和底部操作；未显示设置页时由 body 调用。
     private var dashboard: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -60,11 +71,11 @@ struct DashboardView: View {
                     .frame(maxWidth: .infinity, minHeight: 120)
                     .accessibilityIdentifier("monitoring.empty")
             } else {
-                // Eager rows keep the menu bar panel's measured height in sync
-                // when sections are removed and restored while settings is open.
+                // 立即构建各行，使设置打开期间增删板块时菜单栏面板高度能同步更新。
                 ForEach(presentation.cardRows, id: \.self) { row in
                     HStack(alignment: .top, spacing: 12) {
                         ForEach(row, id: \.self) { section in
+                            // 按选择动态创建对应指标卡片，未选择板块不会进入展示层。
                             card(for: section)
                         }
                         if row.count == 1 {
@@ -88,6 +99,8 @@ struct DashboardView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    /// 为指定板块构建对应指标卡片；详情面板遍历启用板块时调用。
+    /// @ViewBuilder 让不同枚举分支保持静态 View 组合；所有数据来自 Store 已过滤快照，不在视图层触发采集。
     @ViewBuilder
     private func card(for section: MetricSection) -> some View {
         switch section {
@@ -122,10 +135,11 @@ struct DashboardView: View {
             MetricCardView(title: "风扇", value: fan,
                            detail: sensorStatus(store.snapshot?.fan))
         case .diskCapacity:
-            EmptyView() // Disk occupies the full-width row outside the grid.
+            EmptyView() // 磁盘卡片独占全宽行，不在双列网格中重复创建。
         }
     }
 
+    /// 构建仅展示容量的磁盘卡片；磁盘板块启用时由首页调用。
     private var diskCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("磁盘使用量")
@@ -151,17 +165,22 @@ struct DashboardView: View {
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
     }
 
+    /// 将最新磁盘读数转换为界面模型；磁盘卡片刷新时读取。
+    /// 展示模型计算已用比例时处理总量为零并钳制上限，ProgressView 永远接收合法的 0...1 值。
     private var disk: DiskPresentation { DiskPresentation(reading: store.snapshot?.disk) }
 
+    /// 将比例读数格式化为百分比；CPU 和内存卡片刷新时调用。
     private func percent(_ reading: Reading<Double>?) -> String {
         guard let value = reading?.value else { return "—" }
         return MetricFormatter.percent(value * 100)
     }
 
+    /// 将可选字节速率格式化为文本；上传和下载卡片刷新时调用。
     private func rate(_ bytes: Double?) -> String {
         bytes.map(MetricFormatter.rate) ?? "—"
     }
 
+    /// 生成内存容量与历史范围说明；内存卡片刷新时读取。
     private var memoryDetail: String {
         guard let memory = store.snapshot?.memory.value else {
             return MetricPresentation.status(for: store.snapshot?.memory, historyDuration: store.settings.historyDuration)
@@ -169,6 +188,7 @@ struct DashboardView: View {
         return "已用 \(MetricFormatter.memory(memory.usedBytes)) / \(MetricFormatter.memory(memory.totalBytes)) · \(store.settings.historyDuration.recentLabel)"
     }
 
+    /// 生成网络采样状态；上传或下载卡片刷新时调用。
     private func networkStatus(_ bytes: Double?) -> String {
         guard store.snapshot?.network.value != nil else {
             return MetricPresentation.status(for: store.snapshot?.network, historyDuration: store.settings.historyDuration)
@@ -176,12 +196,14 @@ struct DashboardView: View {
         return bytes == nil ? "等待下一次采样" : store.settings.historyDuration.recentLabel
     }
 
+    /// 格式化芯片温度；温度卡片刷新时读取。
     private var temperature: String {
         guard let value = store.snapshot?.temperature.value,
               value.isFinite else { return "—" }
         return String(format: "%.0f °C", value)
     }
 
+    /// 格式化风扇状态或转速；风扇卡片刷新时读取。
     private var fan: String {
         guard let fan = store.snapshot?.fan.value else { return "—" }
         switch fan {
@@ -190,6 +212,7 @@ struct DashboardView: View {
         }
     }
 
+    /// 将传感器 Reading 转换为简短状态；温度或风扇卡片刷新时调用。
     private func sensorStatus<Value>(_ reading: Reading<Value>?) -> String {
         guard let reading else { return "等待下一次采样" }
         return reading.isUnavailable ? "暂不可用" : ""

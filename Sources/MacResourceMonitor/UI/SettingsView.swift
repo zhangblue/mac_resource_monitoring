@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 extension MetricSection {
+    /// 返回板块在设置中的中文名称；构建板块选择按钮时读取。
     var settingsLabel: String {
         switch self {
         case .cpu: "CPU"
@@ -18,9 +19,13 @@ extension MetricSection {
 struct SectionButtonAppearance {
     let isSelected: Bool
 
+    /// 判断按钮是否使用选中样式；设置页渲染板块按钮时读取。
     var isHighlighted: Bool { isSelected }
+    /// 返回辅助功能状态文字；VoiceOver 读取板块按钮时使用。
     var accessibilityValue: String { isSelected ? "显示" : "不显示" }
+    /// 返回按钮背景色；设置页根据选择状态渲染时读取。
     var background: Color { isSelected ? .accentColor : Color(nsColor: .controlColor) }
+    /// 返回按钮前景色；设置页根据选择状态渲染时读取。
     var foreground: Color { isSelected ? .white : .primary }
 }
 
@@ -31,6 +36,8 @@ struct SettingsView: View {
 
     @State private var loginError: String?
 
+    /// 构建设置页的登录项、监控选项和应用信息；导航进入设置时由 SwiftUI 调用。
+    /// 两个 ObservableObject 分别驱动系统登录项与监控配置，ScrollView 限制主体滚动而底部返回按钮保持固定。
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -69,9 +76,11 @@ struct SettingsView: View {
         }
         .frame(width: 380)
         .frame(minHeight: 300, maxHeight: 520)
+        // 页面出现时重新读取系统登录项状态，避免显示进入设置前的旧值。
         .onAppear { loginItemManager.refresh() }
     }
 
+    /// 构建登录启动设置及错误提示；设置页主体渲染时调用。
     private var loginSection: some View {
         VStack(alignment: .leading, spacing: 5) {
             Toggle("登录时自动启动", isOn: Binding(
@@ -90,6 +99,8 @@ struct SettingsView: View {
         }
     }
 
+    /// 构建刷新、历史与板块选择控件；设置页主体渲染时调用。
+    /// Picker 直接绑定 Published 枚举；板块按钮通过显式 set 写 UserDefaults，三列 LazyVGrid 只创建可见单元。
     private var monitoringSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("监控").font(.subheadline.weight(.semibold))
@@ -112,6 +123,7 @@ struct SettingsView: View {
                 ForEach(MetricSection.allCases, id: \.self) { section in
                     let appearance = SectionButtonAppearance(isSelected: settings.selection.contains(section))
                     Button {
+                        // 用户点击时立即持久化选择，MonitoringStore 会按顺序更新采样计划。
                         settings.set(section, enabled: !appearance.isSelected)
                     } label: {
                         Text(section.settingsLabel)
@@ -130,6 +142,7 @@ struct SettingsView: View {
         }
     }
 
+    /// 构建设置摘要、版本和日志位置；设置页主体渲染时调用。
     private var informationSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(settings.summary)
@@ -148,10 +161,12 @@ struct SettingsView: View {
         .font(.caption)
     }
 
+    /// 读取应用短版本号；设置页信息区刷新时读取。
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"
     }
 
+    /// 应用登录启动开关并显示失败原因；用户切换登录项 Toggle 时调用。
     private func setLoginEnabled(_ enabled: Bool) {
         loginError = nil
         do {

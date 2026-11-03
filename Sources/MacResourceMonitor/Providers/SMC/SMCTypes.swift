@@ -4,6 +4,7 @@ struct SMCValue: Sendable {
     let type: String
     let bytes: [UInt8]
 
+    /// 按 SMC 类型解码原始字节；传感器提供器读取键值后调用。
     func decoded() throws -> Double {
         try SMCDecoder.decode(bytes: bytes, type: type)
     }
@@ -25,10 +26,9 @@ enum SMCError: Error {
 }
 
 enum SMCResponseValidation {
+    /// 校验设备响应状态；每次底层 SMC 调用返回后调用。
     static func check(command: UInt8, result: UInt8, status: UInt8) throws {
-        // AppleSMC's private status field has no reliable public definition.
-        // Conservatively fail closed unless both fields are zero, retaining
-        // both raw values for compatibility diagnostics.
+        // AppleSMC 私有状态字段没有可靠公开定义，因此仅在两个字段均为零时接受响应。
         guard result == 0, status == 0 else {
             throw SMCError.deviceFailure(command: command, result: result, status: status)
         }
@@ -36,6 +36,8 @@ enum SMCResponseValidation {
 }
 
 enum SMCDecoder {
+    /// 将支持的 SMC 数字类型解码为 Double；SMCValue 对外解码时调用。
+    /// sp78/fpe2/ui16/ui32 使用大端拼接，flt 在 Apple Silicon 上按小端 IEEE 754 还原，短载荷明确抛错。
     static func decode(bytes: [UInt8], type: String) throws -> Double {
         let length: Int
         switch type {
@@ -47,13 +49,13 @@ enum SMCDecoder {
         guard bytes.count >= length else {
             throw SMCError.insufficientBytes(type: type, expected: length, actual: bytes.count)
         }
-        // Integer and fixed-point payloads use network byte order.
+        // 整数和定点载荷使用网络字节序。
         let integer = bytes.prefix(length).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
         switch type {
         case "sp78": return Double(Int16(bitPattern: UInt16(integer))) / 256
         case "fpe2": return Double(integer) / 4
         case "flt ":
-            // AppleSMC floats use native little-endian IEEE 754 on Apple Silicon.
+            // Apple Silicon 上的 AppleSMC 浮点数使用原生小端 IEEE 754。
             let bits = bytes.prefix(4).enumerated().reduce(UInt32(0)) {
                 $0 | (UInt32($1.element) << (8 * $1.offset))
             }
@@ -64,6 +66,8 @@ enum SMCDecoder {
 }
 
 enum SMCFourCC {
+    /// 将四字符 SMC 键编码为 UInt32；发起键读取前调用。
+    /// 仅接受四个可打印 ASCII 字节并按大端折叠，保证与 AppleSMC FourCC ABI 一致。
     static func encode(_ string: String) throws -> UInt32 {
         let bytes = Array(string.utf8)
         guard bytes.count == 4, bytes.allSatisfy({ $0 >= 0x20 && $0 <= 0x7E }) else {
@@ -72,14 +76,13 @@ enum SMCFourCC {
         return bytes.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
     }
 
+    /// 将 UInt32 SMC 键解码为四字符字符串；枚举键和解析类型时调用。
     static func decode(_ value: UInt32) -> String {
         String(bytes: [24, 16, 8, 0].map { UInt8(truncatingIfNeeded: value >> $0) }, encoding: .ascii) ?? ""
     }
 }
 
-// AppleSMC user-client C ABI, verified against smcFanControl's smc.h:
-// https://github.com/hholtmann/smcFanControl/blob/master/smc-command/smc.h
-// Explicit padding is required: Swift can reuse a nested struct's tail padding.
+// AppleSMC 用户客户端 C ABI 已与 smcFanControl 的 smc.h 交叉验证；显式填充防止 Swift 复用嵌套结构尾部空间。
 struct SMCVersion {
     var major: UInt8 = 0
     var minor: UInt8 = 0
@@ -121,6 +124,8 @@ struct SMCKeyData {
         (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
          0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
+    /// 校验 Swift 结构布局是否符合 AppleSMC C ABI；打开 SMC 连接前调用。
+    /// 同时检查 size、stride 和关键字段偏移，防止编译器布局变化造成越界或错误设备命令。
     static var hasValidLayout: Bool {
         MemoryLayout<Self>.size == 80 && MemoryLayout<Self>.stride == 80 &&
         MemoryLayout<Self>.offset(of: \.version) == 4 &&

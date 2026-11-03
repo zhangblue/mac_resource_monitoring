@@ -3,6 +3,7 @@ import SwiftUI
 enum ProcessRankingStyle {
     case cpu, memory, upload, download
 
+    /// 按榜单类型格式化数值；构建每条进程展示行时调用。
     func format(_ value: Double) -> String {
         switch self {
         case .cpu:
@@ -45,6 +46,8 @@ struct ProcessRankingPresentation {
     let content: ProcessRankingContent
     let slots: [ProcessRankingSlot]
 
+    /// 将进程 Reading 转换为最多五行的稳定展示模型；榜单视图每次渲染时调用。
+    /// 只统计可见 Top 5 的重名并附加 PID；状态消息与数据行最终都归一为固定槽位数组。
     init(reading: Reading<[ProcessRankingEntry]>?, style: ProcessRankingStyle) {
         let content: ProcessRankingContent
         switch reading {
@@ -71,6 +74,8 @@ struct ProcessRankingPresentation {
         slots = Self.makeSlots(for: content)
     }
 
+    /// 补齐固定五个展示槽位；榜单有数据、无数据或不可用时均调用以保持卡片高度。
+    /// 槽位 ID 固定为 0...4，空位使用透明行，避免 SwiftUI diff 时行身份和卡片高度抖动。
     private static func makeSlots(for content: ProcessRankingContent) -> [ProcessRankingSlot] {
         let filled: [ProcessRankingSlot.Content]
         switch content {
@@ -89,6 +94,7 @@ struct ProcessRankingView: View {
     let processes: Reading<[ProcessRankingEntry]>?
     let style: ProcessRankingStyle
 
+    /// 构建固定五行的进程榜单；指标卡片需要展示 Top 5 时由 SwiftUI 调用。
     var body: some View {
         let presentation = ProcessRankingPresentation(reading: processes, style: style)
         VStack(alignment: .leading, spacing: 5) {
